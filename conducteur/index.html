@@ -121,14 +121,14 @@ details p{margin:10px 0 0;color:var(--second);font-size:15px}
 <!-- 1. accueil : conducteur ou passager -->
 <main id="ecranId" class="ecran">
   <h1>Kind</h1>
-  <p class="second">Mesure de la douceur de conduite. Prototype : les codes ne sont pas vérifiés et tout reste dans ce téléphone.</p>
+  <p class="second">Mesure de la douceur de conduite. Prototype : les trajets sont gardés dans ce téléphone et envoyés au serveur du réseau (hébergé en France) dès que la connexion le permet.</p>
   <div class="accueil">
     <form id="formId" class="carte" novalidate>
       <h2 style="margin:0">Je suis conducteur</h2>
       <label class="champ">Code conducteur
         <input id="code" type="text" autocomplete="username" autocapitalize="characters" placeholder="par exemple C-1042"></label>
       <label class="champ">Code PIN
-        <input id="pin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="4" placeholder="4 chiffres"></label>
+        <input id="pin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="6" placeholder="6 chiffres"></label>
       <p id="erreurId" class="erreur" role="alert"></p>
       <button class="principal" type="submit">Continuer</button>
     </form>
@@ -221,6 +221,7 @@ details p{margin:10px 0 0;color:var(--second);font-size:15px}
   <div id="bandeauTest" class="bandeau hidden">Trajet de test : non comptabilisé.</div>
   <div id="bilanCorps"></div>
   <div class="actions" style="margin-top:20px">
+    <p id="envoi" class="second" role="status" style="margin:0;font-size:15px"></p>
     <button id="partager" type="button">Partager les données (CSV)</button>
     <button id="nouveau" class="principal" type="button">Nouveau trajet</button>
     <button id="menuBilan" type="button">Menu principal</button>

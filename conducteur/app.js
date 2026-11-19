@@ -5,6 +5,7 @@
 import { creerMesure, distM, LOG_HEAD } from './mesure.js';
 import { analyseCsv, indicateursVitesse, accostage, qualiteMesure, rattacherCourse, servicesDuJour, ralentissements, PROF } from '../outils/analyse-csv.js';
 import { lireOptions } from './options.js';
+import { connecterConducteur, connecterPassager, envoyerTrajet, utilisateur, estErreurReseau, emailConducteur } from '../commun/supabase.js';
 const OPTIONS = lireOptions();
 
 const $ = id => document.getElementById(id);
@@ -44,18 +45,36 @@ function montrer(id) {
 // ---------- identification ----------
 function initIdentification() {
   try { $('code').value = localStorage.getItem('kind.conducteur') || ''; } catch (e) { /* stockage indisponible */ }
-  $('formId').addEventListener('submit', ev => {
+  $('formId').addEventListener('submit', async ev => {
     ev.preventDefault();
-    const code = $('code').value.trim(), pin = $('pin').value.trim();
+    const code = $('code').value.trim(), pin = $('pin').value.trim(), bouton = ev.submitter || $('formId').querySelector('button');
     if (!code) return erreur('erreurId', 'Saisissez votre code conducteur.');
-    if (!/^\d{4}$/.test(pin)) return erreur('erreurId', 'Le code PIN compte 4 chiffres.');
-    erreur('erreurId', '');
-    E.conducteur = code; try { localStorage.setItem('kind.conducteur', code); } catch (e) { /* rien */ }
+    if (!/^\d{6}$/.test(pin)) return erreur('erreurId', 'Le code PIN compte 6 chiffres.');
+    erreur('erreurId', ''); bouton.disabled = true; bouton.textContent = 'Connexion…';
+    try {
+      const c = await connecterConducteur(code, pin);
+      E.uid = c.uid; E.conducteur = c.code;
+    } catch (e) {
+      // sans réseau : on continue si ce téléphone a déjà une session de ce conducteur ; le trajet partira plus tard
+      const u = estErreurReseau(e) ? await utilisateur().catch(() => null) : null;
+      if (u && u.email === emailConducteur(code)) { E.uid = u.id; E.conducteur = code; }
+      else {
+        bouton.disabled = false; bouton.textContent = 'Continuer';
+        return erreur('erreurId', estErreurReseau(e) ? 'Pas de connexion internet : la première connexion doit se faire avec du réseau.' : 'Code conducteur ou PIN incorrect.');
+      }
+    }
+    bouton.disabled = false; bouton.textContent = 'Continuer';
+    try { localStorage.setItem('kind.conducteur', E.conducteur); } catch (e) { /* rien */ }
     $('pin').value = '';
     E.role = 'conducteur'; configurerRole();
     montrer('ecranService');
+    envoyerEnAttente();
   });
-  $('passagerBtn').addEventListener('click', () => { E.role = 'passager'; configurerRole(); montrer('ecranService'); });
+  $('passagerBtn').addEventListener('click', async () => {
+    E.role = 'passager'; E.uid = null; configurerRole(); montrer('ecranService');
+    // connexion anonyme en arrière-plan ; sans réseau, le trajet partira plus tard
+    try { E.uid = await connecterPassager(); envoyerEnAttente(); } catch (e) { /* hors connexion */ }
+  });
 }
 // le passager monte en cours de ligne : pas de type de trajet, de véhicule ni de profil, un code de campagne
 function configurerRole() {
@@ -397,9 +416,45 @@ function blocVitesse(v) {
   return h + '</section>';
 }
 function enregistrerBilan(B) {
-  E.bilan = B.erreur ? { erreur: B.erreur } : { score: B.score, sous: B.sous, vitesse: B.vitesse || null, arrets: B.aux || null, qualite: B.qualite || null, ponctualite: B.ponct || null, ralentissements: B.ral || null, courses: B.courses.map(({ n, t_debut, t_fin, score, destination }) => ({ n, t_debut, t_fin, score, destination })) };
-  sauver().catch(() => {});
+  E.bilan = B.erreur ? { erreur: B.erreur } : { score: B.score, sous: B.sous, vitesse: B.vitesse || null, arrets: B.aux || null, qualite: B.qualite || null,
+    ponctualite: B.ponct || null, ralentissements: B.ral || null,
+    courses: B.courses.map(({ n, t_debut, t_fin, score, destination, direction }) => ({ n, t_debut, t_fin, score, destination, direction })),
+    evenements: B.evts.map(e => ({ course_n: E.courses[e.course] ? E.courses[e.course].n : null, critere: e.crit, type: e.type, niveau: e.niveau,
+      t: e.t, pic: e.pic, kmh: e.kmh, lat: e.lat, lon: e.lon })) };
+  statutEnvoi('Enregistré dans le téléphone. Envoi au serveur…');
+  sauver().then(() => envoyerEnAttente()).catch(() => statutEnvoi('Enregistré dans le téléphone.'));
 }
+
+// ---------- envoi au serveur (Supabase), avec file d'attente ----------
+// Chaque trajet terminé reste dans le téléphone tant qu'il n'est pas envoyé ; nouvel essai à chaque
+// ouverture de l'appli, à chaque connexion et au retour du réseau.
+function statutEnvoi(txt) { const p = $('envoi'); if (p) p.textContent = txt; }
+let envoiEnCours = null;
+function envoyerEnAttente() {
+  if (!envoiEnCours) envoiEnCours = (async () => {
+    let u = null;
+    try { u = await utilisateur(); } catch (e) { statutEnvoi('Pas de connexion : le trajet sera envoyé dès que le réseau reviendra.'); return; }
+    const d = await db();
+    const tous = await new Promise((res, rej) => { const q = d.transaction('services').objectStore('services').getAll(); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
+    for (const rec of tous.filter(r => r.termine && r.bilan && !r.envoye)) {
+      // un trajet passager sans compte (fait hors connexion) est rattaché à la session anonyme du moment
+      if (rec.role === 'passager' && !rec.auteur && u && u.is_anonymous) rec.auteur = u.id;
+      if (!u || rec.auteur !== u.id) continue;   // trajet d'un autre conducteur : il partira à sa prochaine connexion
+      try {
+        await envoyerTrajet(rec);
+        rec.envoye = true; rec.envoye_le = new Date().toISOString();
+        await new Promise((res, rej) => { const tx = d.transaction('services', 'readwrite'); tx.objectStore('services').put(rec); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+        if (rec.id === E.id) statutEnvoi('Envoyé au serveur ✓');
+      } catch (e) {
+        if (rec.id === E.id) statutEnvoi(estErreurReseau(e) ? 'Pas de connexion : le trajet sera envoyé dès que le réseau reviendra.' : `Envoi impossible pour l’instant (${e.message}). Nouvel essai plus tard.`);
+      }
+    }
+    const courant = tous.find(r => r.id === E.id);
+    if (courant && !courant.envoye && (!u || courant.auteur !== u.id)) statutEnvoi('Enregistré dans le téléphone : il sera envoyé à la prochaine connexion.');
+  })().catch(() => {}).finally(() => { envoiEnCours = null; });
+  return envoiEnCours;
+}
+window.addEventListener('online', () => envoyerEnAttente());
 
 // ---------- sauvegarde dans le téléphone ----------
 let dbP = null;
@@ -415,7 +470,8 @@ function db() {
 async function sauver() {
   if (!E.id || E.demo === undefined) return;
   const d = await db();
-  const rec = { id: E.id, debut: E.debut.toISOString(), role: E.role, campagne: E.campagne || null,
+  const rec = { id: E.id, debut: E.debut.toISOString(), fin: new Date(E.debut.getTime() + E.tDernier * 1000).toISOString(),
+    auteur: E.uid || null, role: E.role, campagne: E.campagne || null,
     conducteur: passager() ? null : E.conducteur, sens: E.ligne ? E.ligne.sens[E.sensIdx].direction : null, vehicule: E.vehicule, profil: E.profil, mode: E.mode,
     ligne: E.ligne ? { id: E.ligne.id, nom_court: E.ligne.nom_court } : null, courses: E.courses, termine: E.termine,
     ressenti: E.ressenti, bilan: E.bilan || null, simulation: !!E.simulation, csv: csvService() };
@@ -522,6 +578,7 @@ async function init() {
   $('nouveau').addEventListener('click', () => montrer('ecranService'));
   $('menuBilan').addEventListener('click', () => montrer('ecranId'));
   fetch('horaires-imagine.json').then(r => r.json()).then(h => { horaires = h; }).catch(() => { /* pas de ponctualité hors ligne */ });
+  setTimeout(() => envoyerEnAttente(), 2000);   // trajets restés dans le téléphone lors d'une session précédente
   try { reseau = await (await fetch('reseau-imagine.json')).json(); initService(); }
   catch (e) { erreur('erreurId', 'Impossible de charger les lignes du réseau. Vérifiez la connexion puis rechargez la page.'); }
 }
