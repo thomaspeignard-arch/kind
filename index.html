@@ -32,6 +32,18 @@ button:focus-visible{outline:3px solid var(--douce);outline-offset:2px}
 #help h1{font-size:26px;margin:0}
 #help ol{margin:0;padding-left:22px;display:flex;flex-direction:column;gap:8px}
 #help p{margin:0;color:var(--muted)}
+#trips{position:fixed;inset:0;z-index:10;background:var(--ink);display:flex;flex-direction:column;padding:calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 16px);overflow-y:auto;-webkit-user-select:text;user-select:text}
+.trips-head{display:flex;align-items:center;justify-content:space-between;gap:12px;max-width:640px;width:100%;margin:0 auto}
+.trips-head h2{font-size:22px;margin:0}
+#tripsNote{color:var(--muted);font-size:15px;max-width:640px;width:100%;margin:8px auto 12px}
+#tripsList{list-style:none;margin:0 auto;padding:0;display:flex;flex-direction:column;gap:10px;max-width:640px;width:100%}
+#tripsList li{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}
+#tripsList .t-info{display:flex;flex-direction:column;gap:3px;min-width:0}
+#tripsList .t-info span{color:var(--muted);font-size:14px;font-variant-numeric:tabular-nums}
+#tripsList .t-info em{color:var(--limite);font-style:normal;font-size:14px}
+#tripsList .t-act{display:flex;gap:8px}
+#tripsList button{min-height:44px;font-size:15px;padding:0 16px}
+#tripsList .share{background:var(--limite);color:var(--ink)}
 .hidden{display:none!important}
 @media (orientation:landscape){#glass{width:auto;height:min(62vh,70vw)}}
 @media (prefers-reduced-motion:reduce){#stage{transition:none}}
@@ -55,7 +67,7 @@ button:focus-visible{outline:3px solid var(--douce);outline-offset:2px}
         <li>Fixez le téléphone sur son support, dans n'importe quel sens, et ne le bougez plus.</li>
         <li>À l'arrêt, appuyez sur <b>Démarrer</b> et restez immobile 3 secondes pendant le calibrage.</li>
         <li>Roulez. Le verre réagit tout de suite ; le sens des virages et des freinages s'affine après quelques freinages, grâce au GPS.</li>
-        <li>À l'arrivée, appuyez sur <b>Arrêter</b> puis <b>Exporter</b> pour m'envoyer le trajet.</li>
+        <li>À l'arrivée, appuyez sur <b>Arrêter</b> : le trajet est enregistré dans le téléphone. Retrouvez-le dans <b>Trajets</b> pour le partager.</li>
       </ol>
       <p>Ne regardez l'écran qu'à l'arrêt, ou faites-vous accompagner. L'écran reste allumé pendant l'enregistrement : branchez le téléphone.</p>
       <p>Pas de voiture sous la main ? <b>Démo</b> rejoue votre trajet du 19 novembre.</p>
@@ -64,7 +76,12 @@ button:focus-visible{outline:3px solid var(--douce);outline-offset:2px}
   <div id="bar">
     <button id="start" class="primary" type="button">Démarrer</button>
     <button id="demo" type="button">Démo</button>
-    <button id="export" type="button" disabled>Exporter</button>
+    <button id="tripsBtn" type="button">Trajets</button>
+  </div>
+  <div id="trips" class="hidden" role="dialog" aria-modal="true" aria-labelledby="tripsTitle">
+    <div class="trips-head"><h2 id="tripsTitle">Trajets enregistrés</h2><button id="tripsClose" type="button">Fermer</button></div>
+    <p id="tripsNote">Les trajets restent dans ce téléphone. Partagez-les pour les envoyer.</p>
+    <ul id="tripsList"></ul>
   </div>
 </div>
 
@@ -235,15 +252,21 @@ async function startLive(){
   window.addEventListener('devicemotion',onMotion);
   if('geolocation' in navigator){S.watch=navigator.geolocation.watchPosition(onGps,()=>{statusEl.textContent='GPS indisponible : le verre fonctionne, sans le sens des virages.';},{enableHighAccuracy:true,maximumAge:0});}
   keepAwake();
-  $('help').classList.add('hidden'); $('start').textContent='Arrêter'; $('demo').disabled=true; $('export').disabled=true;
+  $('help').classList.add('hidden'); $('start').textContent='Arrêter'; $('demo').disabled=true; $('tripsBtn').disabled=true;
+  // le trajet est sauvegardé dans le téléphone pendant l'enregistrement, pour ne rien perdre si la page est coupée
+  S.debut=new Date(); S.id=S.debut.getTime(); S.saveTimer=setInterval(()=>sauverEnCours(false),20000);
   setTimeout(()=>{if(mode==='live'&&!S.last)statusEl.textContent='Aucune donnée des capteurs : vérifiez que la page est ouverte en https.';},2500);
 }
 function stopLive(){
   window.removeEventListener('devicemotion',onMotion);
   if(S.watch!=null)navigator.geolocation.clearWatch(S.watch);
   if(S.wake){S.wake.release().catch(()=>{});S.wake=null;}
-  mode=null; $('start').textContent='Démarrer'; $('demo').disabled=false; $('export').disabled=log.length===0;
-  statusEl.textContent=`Trajet terminé : score ${scoreEl.firstChild.textContent}, ${stats.brusques} moments brusques.`;
+  clearInterval(S.saveTimer);
+  mode=null; $('start').textContent='Démarrer'; $('demo').disabled=false; $('tripsBtn').disabled=false;
+  const fin=`Trajet terminé : score ${scoreEl.firstChild.textContent}, ${stats.brusques} moments brusques.`;
+  if(!log.length){statusEl.textContent=fin;return;}
+  sauverEnCours(true).then(()=>{statusEl.textContent=fin+' Enregistré : retrouvez-le dans Trajets.';})
+    .catch(()=>{statusEl.textContent=fin+' Impossible de l’enregistrer dans ce téléphone.';});
 }
 
 // ---------- mode démo : rejoue le trajet du 19 novembre ----------
@@ -262,19 +285,75 @@ function startDemo(){
 }
 function stopDemo(){clearInterval(demoTimer);mode=null;$('demo').textContent='Démo';$('start').disabled=false;statusEl.textContent=`Fin de la démo : score ${scoreEl.firstChild.textContent}, ${stats.brusques} moments brusques.`;}
 
-// ---------- export du trajet ----------
-async function exportTrip(){
-  const head='t_s,latitude,longitude,vitesse_kmh,h1,h2,longitudinal,lateral,jerk,niveau\n';
-  const csv=head+log.map(r=>r.join(',')).join('\n');
-  const name=`kind-trajet-${new Date().toISOString().slice(0,16).replace(/[:T]/g,'-')}.csv`;
-  const file=new File([csv],name,{type:'text/csv'});
-  try{ if(navigator.canShare&&navigator.canShare({files:[file]})){await navigator.share({files:[file],title:name});return;} }catch(e){}
+// ---------- trajets enregistrés dans le téléphone (IndexedDB) ----------
+const CSV_HEAD='t_s,latitude,longitude,vitesse_kmh,h1,h2,longitudinal,lateral,jerk,niveau\n';
+let dbPromise=null;
+function ouvrirDb(){
+  if(!dbPromise) dbPromise=new Promise((res,rej)=>{
+    if(!('indexedDB' in window)) return rej(new Error('IndexedDB indisponible'));
+    const r=indexedDB.open('kind',1);
+    r.onupgradeneeded=()=>r.result.createObjectStore('trajets',{keyPath:'id'});
+    r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error);
+  }).catch(e=>{dbPromise=null;throw e;});
+  return dbPromise;
+}
+async function dbTx(modeTx,fn){
+  const db=await ouvrirDb();
+  return new Promise((res,rej)=>{const tx=db.transaction('trajets',modeTx), req=fn(tx.objectStore('trajets'));
+    tx.oncomplete=()=>res(req.result); tx.onerror=()=>rej(tx.error); tx.onabort=()=>rej(tx.error);});
+}
+// sauvegarde du trajet en cours (appelée toutes les 20 s, quand l'écran s'éteint, et à l'arrêt)
+function sauverEnCours(termine){
+  if(!S.id||!log.length) return Promise.resolve();
+  const t={ id:S.id, debut:S.debut.toISOString(), termine,
+    duree_s:+log[log.length-1][0], km:stats.dist/1000, score:scoreEl.firstChild.textContent, brusques:stats.brusques,
+    csv:CSV_HEAD+log.map(r=>r.join(',')).join('\n') };
+  if(navigator.storage&&navigator.storage.persist) navigator.storage.persist().catch(()=>{});
+  return dbTx('readwrite',st=>st.put(t));
+}
+document.addEventListener('visibilitychange',()=>{if(mode==='live'&&document.visibilityState==='hidden')sauverEnCours(false).catch(()=>{});});
+
+const nomFichier=t=>`kind-trajet-${t.debut.slice(0,16).replace(/[:T]/g,'-')}.csv`;
+async function partager(t){
+  const name=nomFichier(t), file=new File([t.csv],name,{type:'text/csv'});
+  try{ if(navigator.canShare&&navigator.canShare({files:[file]})){await navigator.share({files:[file],title:name});return;} }
+  catch(e){ if(e.name==='AbortError') return; }   // partage annulé par l'utilisateur
   const url=URL.createObjectURL(file); const a=document.createElement('a'); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),5000);
 }
 
+const fmtDate=new Intl.DateTimeFormat('fr-FR',{weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+const fmtNum=(x,d)=>x.toLocaleString('fr-FR',{minimumFractionDigits:d,maximumFractionDigits:d});
+async function afficherTrajets(){
+  const list=$('tripsList'); list.textContent='';
+  let trajets=[];
+  try{ trajets=(await dbTx('readonly',st=>st.getAll())).sort((a,b)=>b.id-a.id); }
+  catch(e){ $('tripsNote').textContent='Ce navigateur ne permet pas d’enregistrer les trajets dans le téléphone.'; return; }
+  $('tripsNote').textContent=trajets.length?'Les trajets restent dans ce téléphone. Partagez-les pour les envoyer.':'Aucun trajet enregistré pour l’instant. Appuyez sur Démarrer pour en enregistrer un.';
+  for(const t of trajets){
+    const li=document.createElement('li'), info=document.createElement('div'), act=document.createElement('div');
+    info.className='t-info'; act.className='t-act';
+    const titre=document.createElement('b'); titre.textContent=fmtDate.format(new Date(t.debut));
+    const det=document.createElement('span');
+    det.textContent=`${Math.max(1,Math.round(t.duree_s/60))} min · ${fmtNum(t.km,1)} km · score ${t.score} · ${t.brusques} brusque${t.brusques>1?'s':''}`;
+    info.append(titre,det);
+    if(!t.termine){const em=document.createElement('em'); em.textContent='Enregistrement interrompu : trajet incomplet'; info.append(em);}
+    const bP=document.createElement('button'); bP.type='button'; bP.className='share'; bP.textContent='Partager';
+    bP.setAttribute('aria-label','Partager le trajet du '+titre.textContent); bP.addEventListener('click',()=>partager(t));
+    const bS=document.createElement('button'); bS.type='button'; bS.textContent='Supprimer';
+    bS.setAttribute('aria-label','Supprimer le trajet du '+titre.textContent);
+    bS.addEventListener('click',async()=>{ if(!confirm(`Supprimer définitivement le trajet du ${titre.textContent} ?`)) return;
+      await dbTx('readwrite',st=>st.delete(t.id)); afficherTrajets(); });
+    act.append(bP,bS); li.append(info,act); list.append(li);
+  }
+}
+function ouvrirTrajets(){ $('trips').classList.remove('hidden'); afficherTrajets(); $('tripsClose').focus(); }
+function fermerTrajets(){ $('trips').classList.add('hidden'); $('tripsBtn').focus(); }
+
 $('start').addEventListener('click',()=>mode==='live'?stopLive():startLive());
 $('demo').addEventListener('click',()=>mode==='demo'?stopDemo():startDemo());
-$('export').addEventListener('click',exportTrip);
+$('tripsBtn').addEventListener('click',ouvrirTrajets);
+$('tripsClose').addEventListener('click',fermerTrajets);
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('trips').classList.contains('hidden'))fermerTrajets();});
 draw(0,0,0,false);
 </script>
 </body>
