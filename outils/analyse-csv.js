@@ -375,3 +375,43 @@ export function rattacherCourse(texte, horaires, { debut, intervalle = null, rou
     arrets, inter_arrets: inter,
   };
 }
+
+// ---------- ralentissements hors arrêt, par trajet (docs/INDICATEURS.md, point 5, première étape) ----------
+// Épisode où la vitesse lissée reste sous 10 km/h pendant plus de 20 s, en dehors des abords
+// immédiats des arrêts (30 m) : feux, congestion, aménagements. Le cumul sur tous les trajets
+// (même endroit, combien de trajets, temps perdu moyen) viendra avec le serveur.
+const V_RALENTI_KMH = 10, DUREE_RALENTI_S = 20, REPERE_MAX_M = 300;
+
+export function ralentissements(texte, arrets, { intervalles = null } = {}) {
+  const brut = lireCsv(texte), garde = brut.t_s.map(t => t >= 5), d = {};
+  for (const c in brut) d[c] = brut[c].filter((_, i) => garde[i]);
+  const t = d.t_s, vs = lp(remplir(d.vitesse_kmh).map(x => x / 3.6), 0.15), lat = remplir(d.latitude), lon = remplir(d.longitude);
+  const dedans = i => !intervalles || intervalles.some(([a, b]) => t[i] >= a && t[i] <= b);
+  const procheArret = i => arrets.some(a => dist2({ lat: lat[i], lon: lon[i] }, a) <= RAYON_ARRET_M);
+  // l'attente avant le départ et le stationnement à l'arrivée ne sont pas des ralentissements :
+  // on ne regarde qu'entre le premier et le dernier passage au-dessus de 10 km/h
+  // (5 s de suite, pour ne pas se laisser tromper par un sursaut du GPS à l'arrêt)
+  const vite = t.map((_, i) => dedans(i) && vs[i] * 3.6 >= V_RALENTI_KMH), N = 5 * FS;
+  const soutenu = i => { for (let q = i; q < i + N; q++) if (!vite[q]) return false; return true; };
+  const rapides = t.map((_, i) => i).filter(i => i + N <= t.length && soutenu(i));
+  if (!rapides.length) return { nb: 0, duree_totale_s: 0, episodes: [] };
+  const [i0, i1] = [rapides[0], rapides[rapides.length - 1] + N - 1];
+  const lent = t.map((_, i) => i > i0 && i < i1 && dedans(i) && vs[i] * 3.6 < V_RALENTI_KMH && !procheArret(i));
+  const res = [];
+  for (let i = 0; i < t.length;) {
+    if (!lent[i]) { i++; continue; }
+    let j = i; while (j + 1 < t.length && lent[j + 1] && t[j + 1] - t[j] <= 2) j++;
+    const duree = t[j] - t[i];
+    if (duree >= DUREE_RALENTI_S) {
+      let k = i; for (let q = i; q <= j; q++) if (vs[q] < vs[k]) k = q;   // le point le plus lent situe le ralentissement
+      let m = 0; for (let q = i + 1; q <= j; q++) m += (vs[q] + vs[q - 1]) / 2 * (t[q] - t[q - 1]);
+      const p = { lat: lat[k], lon: lon[k] };
+      let repere = null; for (const a of arrets) { const dd = dist2(p, a); if (dd <= REPERE_MAX_M && (!repere || dd < repere.d)) repere = { d: dd, nom: a.nom }; }
+      res.push({ t_debut: t[i], t_fin: t[j], duree_s: Math.round(duree), distance_m: Math.round(m),
+        vitesse_moy_kmh: pyRound(m / duree * 3.6, 1), arret_complet: vs[k] * 3.6 <= V_ARRET_KMH,
+        lat: pyRound(p.lat, 6), lon: pyRound(p.lon, 6), repere: repere ? { nom: repere.nom, distance_m: Math.round(repere.d) } : null });
+    }
+    i = j + 1;
+  }
+  return { nb: res.length, duree_totale_s: res.reduce((s, r) => s + r.duree_s, 0), episodes: res };
+}

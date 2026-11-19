@@ -3,7 +3,7 @@
 // conduite (verre d'eau seul) → fin de service : ressenti avant le score → bilan.
 // Tout reste dans le téléphone (IndexedDB) ; Supabase viendra plus tard.
 import { creerMesure, distM, LOG_HEAD } from './mesure.js';
-import { analyseCsv, indicateursVitesse, accostage, qualiteMesure, rattacherCourse, servicesDuJour, PROF } from '../outils/analyse-csv.js';
+import { analyseCsv, indicateursVitesse, accostage, qualiteMesure, rattacherCourse, servicesDuJour, ralentissements, PROF } from '../outils/analyse-csv.js';
 import { lireOptions } from './options.js';
 const OPTIONS = lireOptions();
 
@@ -250,7 +250,10 @@ function calculerBilan() {
         route: E.ligne ? E.ligne.id : null, direction: E.ligne ? c.direction : null, options: OPTIONS });
     } catch (e) { return { hors_service: true, raison: 'calcul impossible' }; }
   });
-  return { score: moy(evts), sous, courses, evts, vitesse, aux, qualite, ponct };
+  // ralentissements hors arrêt (feux, congestion), sur les parties notées
+  let ral = null;
+  try { ral = ralentissements(csvService(), arrets, { intervalles: E.courses.map(c => [c.t_debut, c.t_fin]) }); } catch (e) { /* rien */ }
+  return { score: moy(evts), sous, courses, evts, vitesse, aux, qualite, ponct, ral };
 }
 
 function arretProche(ev) {
@@ -298,6 +301,7 @@ function afficherBilan() {
   if (B.aux) h += blocArrets(B.aux);
   if (B.ponct) h += blocPonctualite(B.ponct, B.courses);
   if (B.vitesse) h += blocVitesse(B.vitesse);
+  if (B.ral) h += blocRalentissements(B.ral);
   if (E.mode === 'ligne' && !passager()) {
     h += '<h2>Courses</h2><ul class="liste">';
     for (const c of B.courses) h += `<li class="carte"><div><b>Course ${c.n} · ${esc(E.ligne.nom_court)} → ${esc(c.destination)}</b><small>${heureDe(c.t_debut)}–${heureDe(c.t_fin)}${c.auto ? '' : ' · démarrée à la main'}</small></div><b class="note">${c.score ?? '–'}</b></li>`;
@@ -354,6 +358,18 @@ function blocPonctualite(liste, courses) {
   });
   return h + '</section>';
 }
+// ralentissements hors arrêt : plus de 20 s sous 10 km/h, ailleurs qu'aux arrêts (docs/INDICATEURS.md, point 5)
+function blocRalentissements(r) {
+  let h = '<section class="carte vitesse"><h2>Ralentissements</h2>';
+  if (!r.nb) return h + '<p class="note" style="margin:0">Aucun ralentissement hors arrêt (plus de 20 s sous 10 km/h).</p></section>';
+  h += `<p style="margin:0 0 8px">${r.nb} ralentissement${r.nb > 1 ? 's' : ''} hors arrêt, ${duree(r.duree_totale_s)} au total.</p><ul class="liste">`;
+  for (const e of [...r.episodes].sort((a, b) => b.duree_s - a.duree_s).slice(0, 5)) {
+    const ou = e.repere ? `près de ${esc(e.repere.nom)} (${e.repere.distance_m} m)` : 'loin des arrêts';
+    const carte = `https://www.openstreetmap.org/?mlat=${e.lat}&mlon=${e.lon}#map=18/${e.lat}/${e.lon}`;
+    h += `<li><div><b>${duree(e.duree_s)} ${e.arret_complet ? 'à l’arrêt ou au pas' : 'au pas'}</b><small>${heure(new Date(E.debut.getTime() + e.t_debut * 1000))} · ${ou} · <a href="${carte}" target="_blank" rel="noopener">voir sur la carte</a></small></div><span class="mesure">${e.vitesse_moy_kmh.toLocaleString('fr-FR')} km/h<small>${e.distance_m} m</small></span></li>`;
+  }
+  return h + '</ul><p class="note">Feux, congestion, aménagements : le regroupement sur tous les trajets viendra avec le tableau de bord.</p></section>';
+}
 // accostage et départ d'arrêt : là où les voyageurs sont debout
 function blocArrets(a) {
   let h = '<section class="carte vitesse"><h2>Aux arrêts</h2>';
@@ -381,7 +397,7 @@ function blocVitesse(v) {
   return h + '</section>';
 }
 function enregistrerBilan(B) {
-  E.bilan = B.erreur ? { erreur: B.erreur } : { score: B.score, sous: B.sous, vitesse: B.vitesse || null, arrets: B.aux || null, qualite: B.qualite || null, ponctualite: B.ponct || null, courses: B.courses.map(({ n, t_debut, t_fin, score, destination }) => ({ n, t_debut, t_fin, score, destination })) };
+  E.bilan = B.erreur ? { erreur: B.erreur } : { score: B.score, sous: B.sous, vitesse: B.vitesse || null, arrets: B.aux || null, qualite: B.qualite || null, ponctualite: B.ponct || null, ralentissements: B.ral || null, courses: B.courses.map(({ n, t_debut, t_fin, score, destination }) => ({ n, t_debut, t_fin, score, destination })) };
   sauver().catch(() => {});
 }
 
@@ -424,7 +440,7 @@ function genererDemo() {
   const pts = sens.arrets.slice(premier, 12).map(a => ({ lat: a.lat, lon: a.lon }));
   // calée sur une vraie course du jour si possible : le bus attend l'heure prévue à chaque arrêt, avec un peu de retard
   const h = courseDuJourPourDemo(l, sens);
-  let base = null, retard = 10;
+  let base = null, retard = 10, bouchon = false;
   const p0 = pts[0], dep = passager() ? { ...p0 } : { lat: p0.lat - 0.0025, lon: p0.lon - 0.003 };
   const etapes = [dep, ...pts], rows = [], th = 30 * Math.PI / 180, FS = 5, dt = 1 / FS;
   let t = 0, v = 0, a = 0, pos = { ...dep };
@@ -443,6 +459,13 @@ function genererDemo() {
       const aPrec = a; a += Math.max(-jmax * dt, Math.min(jmax * dt, cible - a));
       v = Math.max(0, v + a * dt); if (v === 0 && a < 0) a = 0;
       if (v === 0 && reste < 3) break;   // arrivé à l'arrêt (évite de rester bloqué à quelques mètres)
+      if (s >= 5 && !bouchon && fait > d * 0.2 && d > 300) {   // un ralentissement (feu, congestion) au milieu d'un tronçon assez long
+        bouchon = true;
+        const avance = (acc, jk) => { fait += v * dt; const f = Math.min(1, fait / d); pos = { lat: A.lat + (B.lat - A.lat) * f, lon: A.lon + (B.lon - A.lon) * f }; pousser(acc, 0, jk); };
+        while (v > 1.2) { const ap = a; a = Math.max(-0.9, a - 0.6 * dt); v = Math.max(1.2, v + a * dt); avance(a, Math.abs(a - ap) / dt); }   // freinage doux
+        while (a < 0) { const ap = a; a = Math.min(0, a + 0.5 * dt); avance(a, Math.abs(a - ap) / dt); }
+        for (let q = 0; q < 35 * FS; q++) avance(0, 0);   // 35 s au pas
+      }
       fait += v * dt; const f = Math.min(1, fait / d);
       pos = { lat: A.lat + (B.lat - A.lat) * f, lon: A.lon + (B.lon - A.lon) * f };
       const Lt = virage * Math.sin(Math.PI * f) * Math.min(1, v / 8);
