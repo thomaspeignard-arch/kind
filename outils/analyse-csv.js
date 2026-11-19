@@ -1,158 +1,159 @@
-// Analyse d'un export CSV de kind-live (colonnes t_s, latitude, longitude, vitesse_kmh, h1, h2, …)
-// avec la méthode de la référence Python (reference/analyse/analyse.py + evenements.py) :
-// axe avant appris par le GPS, signe du latéral par le cap calculé depuis les positions,
-// à-coup = dérivée de l'accélération longitudinale filtrée à 1 Hz sur une grille fixe à 5 Hz,
-// événements ignorés sous 3 km/h, note par événement puis moyenne.
-// Usage (navigateur) : const { analyseCsv } = await import('./outils/analyse-csv.js');
-//                      analyseCsv(texteCsv, 'bus')
+// Analyse d'un export CSV de la page Kind (5 Hz) : axes recalés sur le GPS, événements, notes par profil.
+// Portage fidèle en JavaScript du script de référence outils/analyse_kind.py
+// (mêmes filtres, mêmes seuils, mêmes arrondis), pour l'utiliser dans le navigateur sans Python.
+// Usage : const { analyseCsv } = await import('./outils/analyse-csv.js');
+//         const r = analyseCsv(texteCsv);   // r.profils.bus.score, r.profils.voiture.sous, …
 
 export const FS = 5;
-export const VMIN_KMH = 3;
-export const PROFILS = {
-  bus: { nom: 'Bus urbain, passagers debout', acc: [1.0, 1.5, 2.5], jerk: [1.5, 3.0, 5.0] },
-  car: { nom: 'Autocar, passagers assis et attachés', acc: [1.5, 2.5, 3.5], jerk: [2.5, 5.0, 8.0] },
-  voiture: { nom: 'Voiture', acc: [2.0, 3.0, 4.0], jerk: [3.0, 6.0, 10.0] },
+export const PROF = {
+  bus: [[1.0, 1.5, 2.5], [1.5, 3, 5]],
+  car: [[1.5, 2.5, 3.5], [2.5, 5, 8]],
+  voiture: [[2.0, 3.0, 4.0], [3, 6, 10]],
 };
 const NOTE = [100, 70, 30, 0];
-const NIVEAU = ['douce', 'limite', 'brusque', 'tres'];
+export const NIV = ['doux', 'limite', 'brusque', 'très brusque'];
 
-// ---------- filtres de Butterworth appliqués aller-retour (comme scipy filtfilt) ----------
-function butter(order, fc, fs) {
-  const K = Math.tan(Math.PI * fc / fs);
-  if (order === 1) { const n = 1 / (1 + K); return { b: [K * n, K * n, 0], a: [1, (K - 1) * n, 0] }; }
-  const n = 1 / (1 + Math.SQRT2 * K + K * K), b0 = K * K * n;
+// ---------- outils numériques équivalents à numpy / scipy ----------
+// Butterworth d'ordre 2 (comme scipy.signal.butter(2, f / (FS / 2)))
+function butter2(f) {
+  const K = Math.tan(Math.PI * f / FS), n = 1 / (1 + Math.SQRT2 * K + K * K), b0 = K * K * n;
   return { b: [b0, 2 * b0, b0], a: [1, 2 * (K * K - 1) * n, (1 - Math.SQRT2 * K + K * K) * n] };
 }
+// filtre avec état initial en régime permanent sur la première valeur (lfilter_zi × x[0])
 function lfilter({ b, a }, x) {
-  // état initial en régime permanent sur la première valeur (équivalent de lfilter_zi)
-  const y = new Array(x.length); let x1 = x[0], x2 = x[0];
-  const g = (b[0] + b[1] + b[2]) / (1 + a[1] + a[2]); let y1 = g * x[0], y2 = g * x[0];
+  // état de la forme directe transposée II, en régime permanent pour une entrée constante
+  const g = (b[0] + b[1] + b[2]) / (1 + a[1] + a[2]);
+  let z1 = (g - b[0]) * x[0], z2 = (b[2] - a[2] * g) * x[0];
+  const y = new Array(x.length);
   for (let i = 0; i < x.length; i++) {
-    const v = b[0] * x[i] + b[1] * x1 + b[2] * x2 - a[1] * y1 - a[2] * y2;
-    x2 = x1; x1 = x[i]; y2 = y1; y1 = v; y[i] = v;
+    const yi = b[0] * x[i] + z1;
+    z1 = b[1] * x[i] - a[1] * yi + z2;
+    z2 = b[2] * x[i] - a[2] * yi;
+    y[i] = yi;
   }
   return y;
 }
-export function filtfilt(f, x) {
-  const pad = Math.min(x.length - 1, 9);   // extension impaire aux deux bouts, comme scipy
-  const ext = [];
+// scipy.signal.filtfilt : extension impaire de 9 points aux deux bouts, filtre aller puis retour
+function filtfilt(f, x) {
+  const n = x.length, pad = 9, ext = [];
   for (let i = pad; i > 0; i--) ext.push(2 * x[0] - x[i]);
   ext.push(...x);
-  for (let i = 1; i <= pad; i++) ext.push(2 * x[x.length - 1] - x[x.length - 1 - i]);
+  for (let i = 1; i <= pad; i++) ext.push(2 * x[n - 1] - x[n - 1 - i]);
   const y = lfilter(f, lfilter(f, ext).reverse()).reverse();
-  return y.slice(pad, pad + x.length);
+  return y.slice(pad, pad + n);
 }
-const gradient = (x, dt) => x.map((_, i) => i === 0 ? (x[1] - x[0]) / dt : i === x.length - 1 ? (x[i] - x[i - 1]) / dt : (x[i + 1] - x[i - 1]) / (2 * dt));
-function corr(x, y, m) {
-  let n = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
-  for (let i = 0; i < x.length; i++) if (m[i]) { n++; sx += x[i]; sy += y[i]; sxx += x[i] * x[i]; syy += y[i] * y[i]; sxy += x[i] * y[i]; }
-  const cx = sxx - sx * sx / n, cy = syy - sy * sy / n;
-  return (sxy - sx * sy / n) / Math.sqrt(cx * cy);
-}
-function interp(t, ts, ys) {   // interpolation linéaire, ts croissant ; NaN hors données
-  const out = new Array(t.length); let j = 0;
-  for (let i = 0; i < t.length; i++) {
-    while (j < ts.length - 2 && ts[j + 1] < t[i]) j++;
-    if (t[i] < ts[0] || t[i] > ts[ts.length - 1]) { out[i] = NaN; continue; }
-    const f = ts[j + 1] === ts[j] ? 0 : (t[i] - ts[j]) / (ts[j + 1] - ts[j]);
-    out[i] = ys[j] + f * (ys[j + 1] - ys[j]);
-  }
+const lp = (x, f) => filtfilt(butter2(f), x);
+const gradient = (x, dt = 1) => x.map((_, i) => i === 0 ? (x[1] - x[0]) / dt : i === x.length - 1 ? (x[i] - x[i - 1]) / dt : (x[i + 1] - x[i - 1]) / (2 * dt));
+function unwrap(p) {
+  const out = [p[0]];
+  for (let i = 1; i < p.length; i++) { let d = p[i] - p[i - 1]; d = ((d + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI; if (d === -Math.PI && p[i] - p[i - 1] > 0) d = Math.PI; out.push(out[i - 1] + d); }
   return out;
 }
-const distM = (la1, lo1, la2, lo2) => 6371000 * Math.hypot((lo2 - lo1) * Math.PI / 180 * Math.cos((la1 + la2) / 2 * Math.PI / 180), (la2 - la1) * Math.PI / 180);
-const bearing = (la1, lo1, la2, lo2) => Math.atan2((lo2 - lo1) * Math.cos((la1 + la2) / 2 * Math.PI / 180), la2 - la1);
+function corrcoef(x, y, m) {
+  let n = 0, sx = 0, sy = 0;
+  for (let i = 0; i < x.length; i++) if (m[i]) { n++; sx += x[i]; sy += y[i]; }
+  const mx = sx / n, my = sy / n; let cxy = 0, cxx = 0, cyy = 0;
+  for (let i = 0; i < x.length; i++) if (m[i]) { const dx = x[i] - mx, dy = y[i] - my; cxy += dx * dy; cxx += dx * dx; cyy += dy * dy; }
+  return cxy / Math.sqrt(cxx * cyy);
+}
+// pandas : interpolate() linéaire par position, puis bfill() et ffill()
+function remplir(col) {
+  const x = col.slice(), idx = x.map((v, i) => isNaN(v) ? -1 : i).filter(i => i >= 0);
+  if (!idx.length) return x.map(() => 0);
+  for (let k = 0; k + 1 < idx.length; k++) for (let i = idx[k] + 1; i < idx[k + 1]; i++) x[i] = x[idx[k]] + (x[idx[k + 1]] - x[idx[k]]) * (i - idx[k]) / (idx[k + 1] - idx[k]);
+  for (let i = 0; i < idx[0]; i++) x[i] = x[idx[0]];
+  for (let i = idx[idx.length - 1] + 1; i < x.length; i++) x[i] = x[idx[idx.length - 1]];
+  return x;
+}
+// round() de Python : arrondi au pair le plus proche pour les demis
+function pyRound(v, d = 0) {
+  const f = 10 ** d, x = v * f, r = Math.round(x);
+  return (Math.abs(x % 1) === 0.5 ? (r % 2 === 0 ? r : r - 1) : r) / f;
+}
+const mean = a => a.reduce((s, v) => s + v, 0) / a.length;
 
 export function lireCsv(texte) {
   const [tete, ...lignes] = texte.trim().split(/\r?\n/);
-  const cols = tete.split(',');
-  return lignes.map(l => { const v = l.split(','); const o = {}; cols.forEach((c, i) => o[c] = v[i] === '' || v[i] == null ? NaN : +v[i]); return o; });
+  const cols = tete.split(','), d = {};
+  cols.forEach(c => d[c] = []);
+  for (const l of lignes) { const v = l.split(','); cols.forEach((c, i) => d[c].push(v[i] === '' || v[i] == null ? NaN : +v[i])); }
+  return d;
 }
 
-export function analyseCsv(texte, profil = 'bus', opts = {}) {
-  const P = PROFILS[profil], rows = lireCsv(texte).sort((a, b) => a.t_s - b.t_s);
-  const ts = rows.map(r => r.t_s);
-  // grille fixe à 5 Hz ; les trous de plus de 0,5 s dans l'export sont marqués non valides
-  const t = []; for (let x = ts[0]; x <= ts[ts.length - 1]; x += 1 / FS) t.push(+x.toFixed(3));
-  const valid = t.map(() => true);
-  for (let i = 1; i < ts.length; i++) if (ts[i] - ts[i - 1] > 0.5) t.forEach((x, k) => { if (x > ts[i - 1] && x < ts[i]) valid[k] = false; });
-  const h1 = interp(t, ts, rows.map(r => r.h1)), h2 = interp(t, ts, rows.map(r => r.h2));
-  const g = rows.filter(r => !isNaN(r.latitude) && !isNaN(r.vitesse_kmh));
-  const tg = g.map(r => r.t_s);
-  let v = interp(t, tg, g.map(r => Math.max(0, r.vitesse_kmh / 3.6)));
-  const la = interp(t, tg, g.map(r => r.latitude)), lo = interp(t, tg, g.map(r => r.longitude));
-  t.forEach((_, i) => { if (isNaN(v[i])) { v[i] = 0; valid[i] = false; } });
+export function analyseCsv(texte) {
+  const brut = lireCsv(texte);
+  // les 5 premières secondes sont ignorées (calibrage)
+  const garde = brut.t_s.map(t => t >= 5), d = {};
+  for (const c in brut) d[c] = brut[c].filter((_, i) => garde[i]);
+  const n = d.t_s.length;
 
-  // références GPS : accélération (vitesse lissée) et virage (cap calculé depuis les positions)
-  const fv = butter(2, 0.15, FS), vs = filtfilt(fv, v), aGps = gradient(vs, 1 / FS);
-  const cap = new Array(t.length).fill(NaN), W = FS;   // cap entre t-1 s et t+1 s
-  for (let i = W; i < t.length - W; i++) {
-    const [a1, o1, a2, o2] = [la[i - W], lo[i - W], la[i + W], lo[i + W]];
-    if (![a1, o1, a2, o2].some(isNaN) && distM(a1, o1, a2, o2) >= 3) cap[i] = bearing(a1, o1, a2, o2);
-  }
-  for (let i = 1; i < cap.length; i++) if (isNaN(cap[i])) cap[i] = cap[i - 1];
-  for (let i = cap.length - 2; i >= 0; i--) if (isNaN(cap[i])) cap[i] = cap[i + 1];
-  for (let i = 1; i < cap.length; i++) { let d = cap[i] - cap[i - 1]; while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; cap[i] = cap[i - 1] + d; }
-  const cent = gradient(cap.map(c => isNaN(c) ? 0 : c), 1 / FS).map((w, i) => v[i] * w);
-
+  const v = remplir(d.vitesse_kmh).map(x => x / 3.6);
+  const vs = lp(v, 0.15), agps = gradient(vs, 1 / FS), mv = vs.map(x => x > 2);
+  const h1 = d.h1, h2 = d.h2;
   // axe avant : l'angle qui colle le mieux à l'accélération GPS
-  const moving = vs.map((x, i) => x > 2 && valid[i]);
-  let best = 0, bestC = -Infinity;
-  for (let deg = 0; deg < 360; deg++) {
-    const th = deg * Math.PI / 180, c = corr(filtfilt(fv, h1.map((x, i) => Math.cos(th) * x + Math.sin(th) * h2[i])), aGps, moving);
-    if (c > bestC) { bestC = c; best = th; }
+  let corr = -Infinity, ang = 0;
+  for (let a = 0; a < 360; a++) {
+    const c = Math.cos(a * Math.PI / 180), s = Math.sin(a * Math.PI / 180);
+    const r = corrcoef(lp(h1.map((x, i) => c * x + s * h2[i]), 0.15), agps, mv);
+    if (r >= corr) { corr = r; ang = a; }
   }
-  let lon = h1.map((x, i) => Math.cos(best) * x + Math.sin(best) * h2[i]);
-  let lat = h1.map((x, i) => -Math.sin(best) * x + Math.cos(best) * h2[i]);
-  const fs3 = butter(2, 0.3, FS);
-  const cLat0 = corr(filtfilt(fs3, lat), cent, moving);
-  if (cLat0 < 0) lat = lat.map(x => -x);   // positif = virage à droite
-  // biais lents (pente, dévers) retirés par comparaison au GPS
-  const fb = butter(1, 0.05, FS);
-  const bl = filtfilt(fb, lon.map((x, i) => x - aGps[i])), bt = filtfilt(fb, lat.map((x, i) => x - cent[i]));
-  lon = lon.map((x, i) => x - bl[i]); lat = lat.map((x, i) => x - bt[i]);
-  // à-coup : dérivée de l'accélération filtrée à 1 Hz, sur la grille fixe à 5 Hz.
-  // 'combine' (comme la page en direct) : norme des deux axes ; 'longitudinal' : comme la référence Python.
-  const f1 = butter(opts.ordreJerk || 2, 1.0, FS), lp = opts.allerSimple ? x => lfilter(f1, x) : x => filtfilt(f1, x);
-  const jl = gradient(lp(lon), 1 / FS), jt = gradient(lp(lat), 1 / FS);
-  const jerk = opts.jerk === 'longitudinal' ? jl.map(Math.abs) : jl.map((x, i) => Math.hypot(x, jt[i]));
+  const th = ang * Math.PI / 180;
+  const L = h1.map((x, i) => Math.cos(th) * x + Math.sin(th) * h2[i]);
+  let Lt = h1.map((x, i) => -Math.sin(th) * x + Math.cos(th) * h2[i]);
+  // cap calculé depuis les positions GPS lissées (pas de coords.heading)
+  const lat = remplir(d.latitude), lon = remplir(d.longitude), latMoy = mean(lat);
+  const x = lp(lon.map(o => o * Math.PI / 180 * Math.cos(latMoy * Math.PI / 180) * 6371000), 0.2);
+  const y = lp(lat.map(a => a * Math.PI / 180 * 6371000), 0.2);
+  const gx = gradient(x), gy = gradient(y);
+  const head = unwrap(gx.map((_, i) => Math.atan2(gx[i], gy[i])));
+  const cent = gradient(head, 1 / FS).map((w, i) => vs[i] * w);
+  const m3 = vs.map(s => s > 3);
+  const rl = corrcoef(lp(Lt, 0.3), cent, m3);
+  if (rl < 0) Lt = Lt.map(z => -z);   // positif = virage à droite
+  // à-coup : valeur absolue de la dérivée du signal avant-arrière filtré à 1 Hz
+  const J = gradient(lp(L, 1.0), 1 / FS).map(Math.abs);
 
-  // série « valide » ; sous 3 km/h on ignore tout (manipulation du téléphone à l'arrêt)
-  const keep = t.map((_, i) => valid[i]);
-  const S = { t: [], lon: [], lat: [], jerk: [], v: [] };
-  keep.forEach((k, i) => { if (!k) return; const arret = vs[i] * 3.6 < VMIN_KMH;
-    S.t.push(t[i]); S.v.push(vs[i] * 3.6); S.lon.push(arret ? 0 : lon[i]); S.lat.push(arret ? 0 : lat[i]); S.jerk.push(arret ? 0 : jerk[i]); });
-
-  const niveau = (x, s) => { const a = Math.abs(x); return a < s[0] ? 0 : a < s[1] ? 1 : a < s[2] ? 2 : 3; };
-  const evts = [];
-  for (const [nom, serie] of [['freinage', S.lon.map(x => Math.min(x, 0))], ['accélération', S.lon.map(x => Math.max(x, 0))], ['virage', S.lat]]) {
-    for (const [i, j] of episodes(serie)) {
-      let k = i; for (let q = i; q < j; q++) if (Math.abs(serie[q]) > Math.abs(serie[k])) k = q;
-      const pic = serie[k];
-      const jm = nom === 'virage' ? 0 : Math.max(...S.jerk.slice(Math.max(0, i - FS), j + FS));
-      const nv = Math.max(niveau(pic, P.acc), niveau(jm, P.jerk));
-      evts.push({ critere: nom, t: S.t[k], niveau: NIVEAU[nv], note: NOTE[nv], pic: +pic.toFixed(2), jerk_max: +jm.toFixed(2), vitesse_kmh: Math.round(S.v[k]) });
+  function episodes(s, seuil = 0.6, mind = 1.0, gap = 1.0) {
+    const on = s.map(z => Math.abs(z) >= seuil), g = Math.trunc(gap * FS), ev = [];
+    let i = 0;
+    while (i < n) {
+      if (on[i]) {
+        let j = i;
+        while (j < n && (on[j] || on.slice(j, j + g).some(Boolean))) j++;
+        if ((j - i) / FS >= mind && Math.max(...vs.slice(i, j)) * 3.6 >= 3) ev.push([i, j]);  // pas d'événement à l'arrêt
+        i = j;
+      } else i++;
     }
+    return ev;
   }
-  evts.sort((a, b) => a.t - b.t);
-  const moy = e => e.length ? Math.round(e.reduce((s, x) => s + x.note, 0) / e.length) : 100;
-  const sous = {};
-  for (const nom of ['freinage', 'accélération', 'virage']) { const e = evts.filter(x => x.critere === nom); sous[nom] = { nombre: e.length, brusques: e.filter(x => x.niveau === 'brusque' || x.niveau === 'tres').length, note: moy(e) }; }
-  const roule = jerk.filter((_, i) => valid[i] && vs[i] * 3.6 >= VMIN_KMH);
-  return {
-    profil, score: moy(evts), sous_notes: sous, nb_evenements: evts.length,
-    jerk_moyen: +(roule.reduce((s, x) => s + x, 0) / roule.length).toFixed(2),
-    recalage: { axe_avant_deg: Math.round(best * 180 / Math.PI), corr_longitudinale_gps: +bestC.toFixed(2), corr_laterale_gps: +Math.abs(cLat0).toFixed(2) },
-    evenements: evts,
-  };
-}
+  const niv = (a, s) => { a = Math.abs(a); return a < s[0] ? 0 : a < s[1] ? 1 : a < s[2] ? 2 : 3; };
 
-// épisodes où |x| ≥ 0,6 m/s² pendant au moins 1 s (trous de moins de 1 s tolérés)
-function episodes(x, seuil = 0.6, dureeMin = 1.0, trou = 1.0) {
-  const on = x.map(v => Math.abs(v) >= seuil), g = Math.round(trou * FS), ev = [], n = x.length;
-  let i = 0;
-  while (i < n) {
-    if (on[i]) { let j = i; while (j < n && (on[j] || on.slice(j, j + g).some(Boolean))) j++; if ((j - i) / FS >= dureeMin) ev.push([i, j]); i = j; }
-    else i++;
+  const dt = d.t_s.slice(1).map((t, i) => t - d.t_s[i]);
+  const res = {
+    duree_min: pyRound((d.t_s[n - 1] - d.t_s[0]) / 60, 1),
+    km: pyRound(vs.slice(1).reduce((s, z, i) => s + (z + vs[i]) / 2, 0) / FS / 1000, 2),
+    vmax: pyRound(Math.max(...vs) * 3.6), corr_avant: pyRound(corr, 2), corr_lateral: pyRound(Math.abs(rl), 2),
+    trous: dt.filter(z => z > 1).length, jerk_direct: pyRound(mean(d.jerk), 2), jerk_recalcule: pyRound(mean(J), 2),
+    brusque_affiche: pyRound(d.niveau.filter(z => z >= 2).length / n * 100), profils: {},
+  };
+  for (const [pr, [ta, tj]] of Object.entries(PROF)) {
+    const ev = [];
+    for (const [nom, serie] of [['freinage', L.map(z => Math.min(z, 0))], ['accélération', L.map(z => Math.max(z, 0))], ['virage', Lt]]) {
+      for (const [i, j] of episodes(serie)) {
+        let k = i; for (let q = i; q < j; q++) if (Math.abs(serie[q]) > Math.abs(serie[k])) k = q;
+        // freinages et accélérations : à-coup maximal sur l'événement élargi d'1 s avant et après
+        const jm = nom !== 'virage' ? Math.max(...J.slice(Math.max(0, i - FS), j + FS)) : 0;
+        const lv = Math.max(niv(serie[k], ta), niv(jm, tj));
+        ev.push({ type: nom !== 'virage' ? nom : (serie[k] > 0 ? 'virage à droite' : 'virage à gauche'), crit: nom, niveau: lv,
+          t: d.t_s[k], pic: pyRound(serie[k], 2), kmh: pyRound(vs[k] * 3.6), lat: lat[k], lon: lon[k] });
+      }
+    }
+    const sous = {};
+    for (const c of ['freinage', 'accélération', 'virage']) {
+      const e = ev.filter(z => z.crit === c);
+      sous[c] = { nb: e.length, brusques: e.filter(z => z.niveau >= 2).length, note: e.length ? pyRound(mean(e.map(z => NOTE[z.niveau]))) : null };
+    }
+    res.profils[pr] = { score: pyRound(mean(ev.map(z => NOTE[z.niveau]))), sous, evenements: ev };
   }
-  return ev;
+  return res;
 }

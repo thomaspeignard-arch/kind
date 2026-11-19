@@ -6,3 +6,6 @@ data/
 
 # Article scientifique protégé par le droit d'auteur
 docs/*.pdf
+
+# Résultats attendus : contiennent les positions GPS des trajets
+outils/attendu-trajet-*.json
