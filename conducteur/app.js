@@ -64,7 +64,7 @@ function configurerRole() {
   $('conseil').textContent = p ? 'Posez le téléphone à plat (sur vos genoux ou un siège) et ne le bougez plus pendant le trajet. Au départ, restez immobile 3 secondes.'
     : 'Fixez le téléphone sur son support et ne le bougez plus. Au départ, restez immobile 3 secondes.';
   $('demarrer').textContent = p ? 'Démarrer la mesure' : 'Démarrer le service';
-  $('finService').textContent = p ? 'Je descends' : 'Fin de service';
+  $('finService').textContent = p ? 'Je descends' : 'Arrêter';
   $('titreRessenti').textContent = 'Avant de voir le score';
   $('questionRessenti').textContent = p ? 'Selon vous, quel score mérite le confort de ce trajet ?' : 'Selon vous, quel score mérite votre conduite de ce service ?';
   majMode();
@@ -113,7 +113,7 @@ async function demarrerService(demo) {
   else E.ligne = E.mode === 'ligne' ? reseau.lignes.find(x => x.id === $('ligne').value) : null;
   E.sensIdx = E.ligne ? +document.querySelector('input[name=sens]:checked').value : 0;
   Object.assign(E, { debut: new Date(), courses: [], enCourse: null, tDernier: 0, gps: null, lvl: 0, lvlJusqua: 0, ressenti: null, termine: false, demo: null, simulation: false, bilan: null });
-  E.id = E.debut.getTime();
+  E.id = E.debut.getTime(); E.estDemo = demo;
   montrer('ecranConduite'); dessiner(0, 0, 0, false); majPuce();
   if (demo) { E.log = []; lancerDemo(); }
   else {
@@ -192,6 +192,17 @@ function finService() {
   $('ressenti').value = 5; $('ressentiVal').innerHTML = '–<small>/10</small>'; $('ressenti').dataset.touche = '';
   $('voirBilan').disabled = true;
   montrer('ecranRessenti');
+}
+
+// recommencer : efface l'enregistrement en cours et repart avec les mêmes réglages (nouveau calibrage)
+async function recommencer() {
+  if (!confirm('Effacer cet enregistrement et recommencer depuis le début ?')) return;
+  const id = E.id, demo = E.estDemo;
+  arreterCapteurs(); E.enCourse = null; E.id = 0;
+  try { const d = await db(); await new Promise((res, rej) => { const tx = d.transaction('services', 'readwrite'); tx.objectStore('services').delete(id); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
+  catch (e) { /* rien n'était encore sauvegardé */ }
+  $('statut').textContent = '';
+  demarrerService(demo);
 }
 
 // ---------- ressenti puis bilan ----------
@@ -372,7 +383,8 @@ function lancerDemo() {
 async function init() {
   initIdentification(); initRessenti();
   $('courseBtn').addEventListener('click', () => E.enCourse ? finCourse(E.tDernier, false) : debutCourse(E.tDernier, false));
-  $('finService').addEventListener('click', () => { if (confirm(passager() ? 'Arrêter la mesure de votre trajet ?' : 'Terminer le service ?')) finService(); });
+  $('finService').addEventListener('click', () => { if (confirm(passager() ? 'Arrêter la mesure de votre trajet ?' : 'Arrêter l’enregistrement et voir le bilan ?')) finService(); });
+  $('recommencer').addEventListener('click', recommencer);
   $('partager').addEventListener('click', partager);
   $('nouveau').addEventListener('click', () => montrer('ecranService'));
   try { reseau = await (await fetch('reseau-imagine.json')).json(); initService(); }

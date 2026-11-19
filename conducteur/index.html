@@ -51,14 +51,16 @@ button:disabled{opacity:.45;cursor:default}
 .hidden{display:none!important}
 
 /* conduite : écran de nuit, seul le verre d'eau compte */
-#ecranConduite{max-width:none;height:100dvh;display:flex;flex-direction:column;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
-#scene{flex:1;position:relative;display:flex;align-items:center;justify-content:center;border-radius:24px;margin:10px;box-shadow:inset 0 0 0 4px #5FA8D3;transition:box-shadow .12s;overflow:hidden}
+#ecranConduite{max-width:none;height:100vh;height:100dvh;display:flex;flex-direction:column;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+#scene{flex:1;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;border-radius:24px;margin:10px;box-shadow:inset 0 0 0 4px #5FA8D3;transition:box-shadow .12s;overflow:hidden}
 #verre{width:min(72vw,56vh);height:auto}
 #puce{position:absolute;top:14px;left:14px;right:14px;text-align:center;font-size:15px;color:var(--nuit-second);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #puce.active{color:var(--nuit-texte);font-weight:600}
 #statut{position:absolute;bottom:14px;left:0;right:0;text-align:center;font-size:15px;color:var(--nuit-second);padding:0 16px}
-#barre{display:flex;gap:10px;justify-content:center;padding:0 10px 12px}
-#barre button{background:var(--nuit-ligne);color:var(--nuit-texte);border-radius:26px;flex:1;max-width:240px}
+#barre{flex:none;display:flex;flex-wrap:wrap;gap:10px;justify-content:center;padding:0 10px 12px}
+#barre button{background:var(--nuit-ligne);color:var(--nuit-texte);border-radius:26px;flex:1 1 40%;max-width:280px}
+#barre #courseBtn{flex-basis:100%;max-width:570px;background:#3A5578}
+#barre #finService{background:#F2B04A;color:var(--nuit)}
 @media (orientation:landscape){#verre{width:auto;height:min(60vh,70vw)}}
 @media (prefers-reduced-motion:reduce){#scene{transition:none}}
 
@@ -167,7 +169,8 @@ details p{margin:10px 0 0;color:var(--second);font-size:15px}
   </div>
   <div id="barre">
     <button id="courseBtn" type="button">Début de course</button>
-    <button id="finService" type="button">Fin de service</button>
+    <button id="finService" type="button">Arrêter</button>
+    <button id="recommencer" type="button">Recommencer</button>
   </div>
 </main>
 
