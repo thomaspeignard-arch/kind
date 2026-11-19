@@ -92,9 +92,10 @@ function levelOf(lon,lat,mag,jerk,known){
 }
 
 // mise à jour des statistiques et de l'affichage, appelée à chaque mesure
+const VMIN=3/3.6;   // sous 3 km/h : téléphone manipulé à l'arrêt, on ignore les événements
 function step(now,dt,lon,lat,mag,jerk,known,speed,pos){
-  const lvl=levelOf(lon,lat,mag,jerk,known);
-  const moving = speed==null || speed>1;
+  const moving = speed==null || speed>=VMIN;
+  const lvl = moving ? levelOf(lon,lat,mag,jerk,known) : 0;
   if(moving){stats.tMove+=dt; if(lvl===1)stats.tLim+=dt; if(lvl===2)stats.tBrus+=dt;}
   if(speed!=null)stats.dist+=speed*dt;
   // un « moment brusque » = au moins 0,4 s au-dessus du seuil
@@ -123,7 +124,9 @@ function draw(lon,lat,mag,known){
 const S={ up:null, e1:null, e2:null, calib:[], calibUntil:0, last:null,
   lp:[0,0], lp1:[0,0], bias:[0,0], prevLp1:null,
   fwd:null, sumIdx:{m1:0,m2:0,n:0}, reg:{a:0,b:0,c:0,d:0,e:0,n:0}, latSign:{s:0,n:0},
-  gps:null, gpsPrev:null, heading:null, wake:null, watch:null };
+  jk:{t:null,prev:null,val:0}, anchor:null, seg:null, hist:[],
+  gps:null, wake:null, watch:null };
+const JSTEP=0.2;   // pas fixe du calcul de l'à-coup (5 Hz)
 
 const norm=v=>{const n=Math.hypot(v[0],v[1],v[2]);return [v[0]/n,v[1]/n,v[2]/n];};
 const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
@@ -155,7 +158,16 @@ function onMotion(ev){
   const kb=dt/15; S.bias=S.bias.map((b,i)=>b+kb*(S.lp[i]-b));
   const a1=S.lp[0]-S.bias[0], a2=S.lp[1]-S.bias[1];
   const mag=Math.hypot(a1,a2);
-  const jerk=Math.hypot(S.lp1[0]-lp1Prev[0],S.lp1[1]-lp1Prev[1])/dt;
+  // à-coup : dérivée du signal filtré à 1 Hz, rééchantillonné à pas fixe (0,2 s = 5 Hz),
+  // et non échantillon par échantillon (le pas irrégulier des capteurs multipliait le bruit)
+  const J=S.jk, tPrev=now-dt;
+  if(J.t==null||now-J.t>1){J.t=now;J.prev=S.lp1.slice();J.val=0;}
+  else while(now>=J.t+JSTEP){
+    const tt=J.t+JSTEP, f=Math.min(1,Math.max(0,(tt-tPrev)/dt));
+    const cur=[0,1].map(i=>lp1Prev[i]+f*(S.lp1[i]-lp1Prev[i]));
+    J.val=Math.hypot(cur[0]-J.prev[0],cur[1]-J.prev[1])/JSTEP; J.prev=cur; J.t=tt;
+  }
+  const jerk=J.val;
   // accumulation pour l'apprentissage de l'axe avant (moyenne entre deux points GPS)
   S.sumIdx.m1+=a1; S.sumIdx.m2+=a2; S.sumIdx.n++;
   let lon=0,lat=0,known=false;
@@ -168,24 +180,44 @@ function onMotion(ev){
 
 function onGps(p){
   const c=p.coords, t=p.timestamp/1000;
-  const cur={t,lat:c.latitude,lon:c.longitude,speed:(c.speed!=null&&!isNaN(c.speed))?c.speed:null,heading:(c.heading!=null&&!isNaN(c.heading))?c.heading:null};
+  const cur={t,lat:c.latitude,lon:c.longitude,speed:(c.speed!=null&&!isNaN(c.speed))?c.speed:null};
   const prev=S.gps; S.gps=cur;
-  if(!prev||cur.speed==null||prev.speed==null||!S.sumIdx.n) {S.sumIdx={m1:0,m2:0,n:0};return;}
-  const dt=t-prev.t; if(dt<0.5||dt>3){S.sumIdx={m1:0,m2:0,n:0};return;}
-  const aGps=(cur.speed-prev.speed)/dt, m1=S.sumIdx.m1/S.sumIdx.n, m2=S.sumIdx.m2/S.sumIdx.n;
+  // accélération horizontale moyenne depuis le point GPS précédent
+  const n=S.sumIdx.n, m1=n?S.sumIdx.m1/n:0, m2=n?S.sumIdx.m2/n:0;
   S.sumIdx={m1:0,m2:0,n:0};
+  if(n){S.hist.push({t,m1,m2}); if(S.hist.length>30)S.hist.shift();}
+  learnLatSign(cur);
+  if(!prev||cur.speed==null||prev.speed==null||!n) return;
+  const dt=t-prev.t; if(dt<0.5||dt>3) return;
+  const aGps=(cur.speed-prev.speed)/dt;
   // régression a_gps ≈ c·m1 + s·m2 : donne l'axe avant du véhicule dans le repère du téléphone
   if(cur.speed>2 && Math.abs(aGps)>0.25){
     const R=S.reg; R.a+=m1*m1; R.b+=m1*m2; R.c+=m2*m2; R.d+=m1*aGps; R.e+=m2*aGps; R.n++;
     const det=R.a*R.c-R.b*R.b;
     if(R.n>=12 && Math.abs(det)>1e-6){const cc=(R.c*R.d-R.b*R.e)/det, ss=(R.a*R.e-R.b*R.d)/det, n=Math.hypot(cc,ss); if(n>0.3){S.fwd=[cc/n,ss/n]; if(R.n===12)statusEl.textContent='Sens de marche appris';}}
   }
-  // signe du latéral : comparé au virage mesuré par le cap GPS (droite = cap qui augmente)
-  if(S.fwd && cur.heading!=null && prev.heading!=null && cur.speed>3){
-    let dh=cur.heading-prev.heading; if(dh>180)dh-=360; if(dh<-180)dh+=360;
-    const cent=cur.speed*dh*Math.PI/180/dt, latRaw=-S.fwd[1]*m1+S.fwd[0]*m2;
-    if(Math.abs(cent)>0.8){S.latSign.s+=Math.sign(cent*latRaw);S.latSign.n++;}
-  }
+}
+
+// distance (m) et cap (degrés, 0 = nord, sens horaire) entre deux positions GPS
+function distM(a,b){const x=(b.lon-a.lon)*Math.PI/180*Math.cos((a.lat+b.lat)/2*Math.PI/180), y=(b.lat-a.lat)*Math.PI/180; return 6371000*Math.hypot(x,y);}
+function bearingDeg(a,b){const x=(b.lon-a.lon)*Math.cos((a.lat+b.lat)/2*Math.PI/180), y=b.lat-a.lat; return (Math.atan2(x,y)*180/Math.PI+360)%360;}
+
+// signe du latéral : comparé au virage mesuré par le cap GPS (droite = cap qui augmente).
+// Le cap est calculé à partir des positions successives : coords.heading est souvent vide
+// sur Chrome Android. On attend d'avoir parcouru 5 m pour que le bruit GPS ne fausse pas le cap.
+function learnLatSign(cur){
+  if(!S.anchor||cur.t-S.anchor.t>6){S.anchor=cur;S.seg=null;return;}  // début, arrêt ou trou GPS
+  if(distM(S.anchor,cur)<5) return;
+  const seg={h:bearingDeg(S.anchor,cur), t:(S.anchor.t+cur.t)/2};
+  const prevSeg=S.seg; S.seg=seg; S.anchor=cur;
+  if(!prevSeg||!S.fwd||cur.speed==null||cur.speed<=3) return;
+  const span=seg.t-prevSeg.t; if(span<0.5||span>6) return;
+  let dh=seg.h-prevSeg.h; if(dh>180)dh-=360; if(dh<-180)dh+=360;
+  // accélération moyenne sur la même période que le changement de cap
+  const pts=S.hist.filter(p=>p.t>prevSeg.t&&p.t<=cur.t); if(!pts.length) return;
+  const m1=pts.reduce((s,p)=>s+p.m1,0)/pts.length, m2=pts.reduce((s,p)=>s+p.m2,0)/pts.length;
+  const cent=cur.speed*dh*Math.PI/180/span, latRaw=-S.fwd[1]*m1+S.fwd[0]*m2;
+  if(Math.abs(cent)>0.8){S.latSign.s+=Math.sign(cent*latRaw);S.latSign.n++; if(S.latSign.n===5)statusEl.textContent='Sens des virages appris';}
 }
 
 async function keepAwake(){try{if('wakeLock' in navigator){S.wake=await navigator.wakeLock.request('screen');}}catch(e){}}
@@ -199,7 +231,7 @@ async function startLive(){
   }catch(e){statusEl.textContent='Impossible d’accéder aux capteurs : '+e.message;return;}
   if(typeof DeviceMotionEvent==='undefined'){statusEl.textContent='Ce navigateur ne donne pas accès aux capteurs de mouvement.';return;}
   resetStats(); mode='live';
-  Object.assign(S,{up:null,calib:[],calibUntil:performance.now()/1000+3,last:null,lp:[0,0],lp1:[0,0],bias:[0,0],fwd:null,sumIdx:{m1:0,m2:0,n:0},reg:{a:0,b:0,c:0,d:0,e:0,n:0},latSign:{s:0,n:0},gps:null,lastLog:0,t0:performance.now()/1000});
+  Object.assign(S,{up:null,calib:[],calibUntil:performance.now()/1000+3,last:null,lp:[0,0],lp1:[0,0],bias:[0,0],fwd:null,sumIdx:{m1:0,m2:0,n:0},reg:{a:0,b:0,c:0,d:0,e:0,n:0},latSign:{s:0,n:0},jk:{t:null,prev:null,val:0},anchor:null,seg:null,hist:[],gps:null,lastLog:0,t0:performance.now()/1000});
   window.addEventListener('devicemotion',onMotion);
   if('geolocation' in navigator){S.watch=navigator.geolocation.watchPosition(onGps,()=>{statusEl.textContent='GPS indisponible : le verre fonctionne, sans le sens des virages.';},{enableHighAccuracy:true,maximumAge:0});}
   keepAwake();
