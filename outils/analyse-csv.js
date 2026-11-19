@@ -160,3 +160,68 @@ export function analyseCsv(texte) {
   }
   return res;
 }
+
+// ---------- indicateurs de vitesse (docs/INDICATEURS.md, point 1) ----------
+// Vitesse commerciale = distance / durée totale (arrêts compris) ;
+// vitesse de roulage = distance / temps où la vitesse lissée dépasse 3 km/h ;
+// temps à l'arrêt, séparé entre les points d'arrêt GTFS (≤ 30 m) et ailleurs (feux, congestion).
+// Mêmes bases que analyseCsv : 5 premières secondes ignorées, vitesse GPS lissée à 0,15 Hz,
+// distance = intégrale de cette vitesse, une ligne du CSV = 1/5 s.
+// arrets : [{lat, lon, nom}] ; intervalles : [[t_debut, t_fin], …] en secondes du CSV
+// (par exemple les courses notées), ou null pour tout le trajet.
+// options.vitesse_pics : 'off' (défaut) | 'conducteur' | 'troncons' | 'nominatif'.
+// Avec 'off', la vitesse max n'est ni calculée ni renvoyée.
+export const VITESSE_PICS = ['off', 'conducteur', 'troncons', 'nominatif'];
+const RAYON_ARRET_M = 30, V_ARRET_KMH = 3;
+const dist2 = (a, b) => 6371000 * Math.hypot((b.lon - a.lon) * Math.PI / 180 * Math.cos((a.lat + b.lat) / 2 * Math.PI / 180), (b.lat - a.lat) * Math.PI / 180);
+
+export function indicateursVitesse(texte, { arrets = [], intervalles = null, options = {} } = {}) {
+  const pics = VITESSE_PICS.includes(options.vitesse_pics) ? options.vitesse_pics : 'off';
+  const brut = lireCsv(texte);
+  const garde = brut.t_s.map(t => t >= 5), d = {};
+  for (const c in brut) d[c] = brut[c].filter((_, i) => garde[i]);
+  const vs = lp(remplir(d.vitesse_kmh).map(x => x / 3.6), 0.15);
+  const lat = remplir(d.latitude), lon = remplir(d.longitude), t = d.t_s;
+  const dedans = i => !intervalles || intervalles.some(([a, b]) => t[i] >= a && t[i] <= b);
+  const idx = t.map((_, i) => i).filter(dedans);
+  if (idx.length < 2) return null;
+
+  // distance : trapèzes sur la vitesse lissée, comme analyse_kind.py (np.trapezoid, pas de 1/5 s)
+  let m = 0;
+  for (let k = 1; k < idx.length; k++) if (idx[k] === idx[k - 1] + 1) m += (vs[idx[k]] + vs[idx[k - 1]]) / 2 / FS;
+  // durée totale : de la première à la dernière mesure de chaque intervalle (arrêts compris)
+  let duree = 0, debut = idx[0];
+  for (let k = 1; k <= idx.length; k++) if (k === idx.length || idx[k] !== idx[k - 1] + 1) { duree += t[idx[k - 1]] - t[debut]; debut = idx[k]; }
+
+  // temps en roulage et à l'arrêt : une ligne = 1/5 s ; à l'arrêt, au point d'arrêt GTFS ou ailleurs
+  let roule = 0, auxArrets = 0, ailleurs = 0, nbAuxArrets = 0, nbAilleurs = 0, prec = null;
+  for (const i of idx) {
+    if (vs[i] * 3.6 > V_ARRET_KMH) { roule += 1 / FS; prec = null; continue; }
+    const p = { lat: lat[i], lon: lon[i] };
+    const ici = arrets.some(a => dist2(p, a) <= RAYON_ARRET_M) ? 'arret' : 'ailleurs';
+    if (ici === 'arret') auxArrets += 1 / FS; else ailleurs += 1 / FS;
+    if (ici !== prec) { if (ici === 'arret') nbAuxArrets++; else nbAilleurs++; }
+    prec = ici;
+  }
+  const mesure = roule + auxArrets + ailleurs;
+  // l'export n'est pas exactement à 5 Hz (environ 0,21 s par ligne) : les temps sont des parts de la durée réelle
+  const part = x => (mesure ? x / mesure : 0) * duree;
+  let coupures = 0;
+  for (let k = 1; k < idx.length; k++) if (idx[k] === idx[k - 1] + 1) { const g = t[idx[k]] - t[idx[k - 1]]; if (g > 1) coupures += g; }
+  const r = {
+    km: pyRound(m / 1000, 2), duree_min: pyRound(duree / 60, 1), duree_s: Math.round(duree),
+    vitesse_commerciale_kmh: duree > 0 ? pyRound(m / duree * 3.6, 1) : null,
+    vitesse_roulage_kmh: roule > 0 ? pyRound(m / part(roule) * 3.6, 1) : null,
+    temps_roulage_s: Math.round(part(roule)), temps_arret_s: Math.round(part(auxArrets + ailleurs)),
+    temps_arret_aux_arrets_s: Math.round(part(auxArrets)), temps_arret_ailleurs_s: Math.round(part(ailleurs)),
+    part_arret: mesure ? pyRound((auxArrets + ailleurs) / mesure, 3) : null,
+    part_arret_aux_arrets: mesure ? pyRound(auxArrets / mesure, 3) : null,
+    part_arret_ailleurs: mesure ? pyRound(ailleurs / mesure, 3) : null,
+    nb_arrets_aux_arrets: nbAuxArrets, nb_arrets_ailleurs: nbAilleurs,
+    temps_coupures_s: Math.round(coupures),   // trous de plus d'une seconde dans l'enregistrement
+    vitesse_pics: pics,
+  };
+  // vitesse max : seulement si l'exploitant a activé l'option (CNIL : off par défaut)
+  if (pics !== 'off') r.vitesse_max_kmh = pyRound(Math.max(...idx.map(i => vs[i])) * 3.6);
+  return r;
+}

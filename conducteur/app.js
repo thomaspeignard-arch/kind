@@ -3,7 +3,9 @@
 // conduite (verre d'eau seul) → fin de service : ressenti avant le score → bilan.
 // Tout reste dans le téléphone (IndexedDB) ; Supabase viendra plus tard.
 import { creerMesure, distM, LOG_HEAD } from './mesure.js';
-import { analyseCsv, PROF } from '../outils/analyse-csv.js';
+import { analyseCsv, indicateursVitesse, PROF } from '../outils/analyse-csv.js';
+import { lireOptions } from './options.js';
+const OPTIONS = lireOptions();
 
 const $ = id => document.getElementById(id);
 const VMIN = 3 / 3.6;            // sous 3 km/h : rien n'est compté (manipulation à l'arrêt)
@@ -230,7 +232,13 @@ function calculerBilan() {
   const sous = {};
   for (const c of ['freinage', 'accélération', 'virage']) { const l = evts.filter(e => e.crit === c); sous[c] = { nb: l.length, brusques: l.filter(e => e.niveau >= 2).length, note: moy(l) }; }
   const courses = E.courses.map((c, i) => { const l = evts.filter(e => e.course === i); return { ...c, score: moy(l), nb: l.length, brusques: l.filter(e => e.niveau >= 2).length }; });
-  return { score: moy(evts), sous, courses, evts };
+  // indicateurs de vitesse sur les parties notées (les courses), arrêts de la ligne ou de tout le réseau
+  let vitesse = null;
+  try {
+    const arrets = (E.ligne ? [E.ligne] : reseau.lignes).flatMap(l => l.sens.flatMap(s => s.arrets));
+    vitesse = indicateursVitesse(csvService(), { arrets, intervalles: E.courses.map(c => [c.t_debut, c.t_fin]), options: OPTIONS });
+  } catch (e) { /* pas assez de données de vitesse */ }
+  return { score: moy(evts), sous, courses, evts, vitesse };
 }
 
 function arretProche(ev) {
@@ -273,6 +281,7 @@ function afficherBilan() {
     h += `<div class="carte">${icone(ic, '#1F4E79')}<span class="lab">${lab}</span><b>${s.note ?? '–'}</b><small>${s.nb} notés · ${s.brusques} brusque${s.brusques > 1 ? 's' : ''}</small></div>`;
   }
   h += '</section>';
+  if (B.vitesse) h += blocVitesse(B.vitesse);
   if (E.mode === 'ligne' && !passager()) {
     h += '<h2>Courses</h2><ul class="liste">';
     for (const c of B.courses) h += `<li class="carte"><div><b>Course ${c.n} · ${esc(E.ligne.nom_court)} → ${esc(c.destination)}</b><small>${heureDe(c.t_debut)}–${heureDe(c.t_fin)}${c.auto ? '' : ' · démarrée à la main'}</small></div><b class="note">${c.score ?? '–'}</b></li>`;
@@ -295,8 +304,26 @@ function afficherBilan() {
   enregistrerBilan(B);
   montrer('ecranBilan');
 }
+// vitesse commerciale, vitesse de roulage et temps à l'arrêt (docs/INDICATEURS.md, point 1)
+const kmh = x => x == null ? '–' : `${x.toLocaleString('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} km/h`;
+const duree = s => s < 60 ? `${s} s` : `${Math.floor(s / 60)} min${s % 60 ? ' ' + String(s % 60).padStart(2, '0') + ' s' : ''}`;
+const pct = x => `${Math.round(x * 100)} %`;
+function blocVitesse(v) {
+  let h = '<section class="carte vitesse"><h2>Vitesse et arrêts</h2><dl>';
+  h += `<div><dt>Vitesse commerciale</dt><dd>${kmh(v.vitesse_commerciale_kmh)}</dd></div>`;
+  h += `<div><dt>Vitesse de roulage</dt><dd>${kmh(v.vitesse_roulage_kmh)}</dd></div>`;
+  h += `<div><dt>Distance · durée</dt><dd>${v.km.toLocaleString('fr-FR')} km · ${duree(v.duree_s)}</dd></div>`;
+  h += `<div><dt>À l’arrêt</dt><dd>${duree(v.temps_arret_s)} (${pct(v.part_arret)})</dd></div>`;
+  h += `<div class="detail"><dt>aux points d’arrêt</dt><dd>${duree(v.temps_arret_aux_arrets_s)} · ${v.nb_arrets_aux_arrets} arrêt${v.nb_arrets_aux_arrets > 1 ? 's' : ''}</dd></div>`;
+  h += `<div class="detail"><dt>ailleurs (feux, congestion)</dt><dd>${duree(v.temps_arret_ailleurs_s)} · ${v.nb_arrets_ailleurs} arrêt${v.nb_arrets_ailleurs > 1 ? 's' : ''}</dd></div>`;
+  // vitesse max : seulement si l'exploitant l'a activée (option vitesse_pics), et pour le conducteur lui-même
+  if (v.vitesse_max_kmh != null && !passager()) h += `<div><dt>Vitesse max</dt><dd>${v.vitesse_max_kmh} km/h</dd></div>`;
+  h += '</dl>';
+  if (v.temps_coupures_s > 0) h += `<p class="note">Enregistrement interrompu ${duree(v.temps_coupures_s)} : distance un peu sous-estimée.</p>`;
+  return h + '</section>';
+}
 function enregistrerBilan(B) {
-  E.bilan = B.erreur ? { erreur: B.erreur } : { score: B.score, sous: B.sous, courses: B.courses.map(({ n, t_debut, t_fin, score, destination }) => ({ n, t_debut, t_fin, score, destination })) };
+  E.bilan = B.erreur ? { erreur: B.erreur } : { score: B.score, sous: B.sous, vitesse: B.vitesse || null, courses: B.courses.map(({ n, t_debut, t_fin, score, destination }) => ({ n, t_debut, t_fin, score, destination })) };
   sauver().catch(() => {});
 }
 
