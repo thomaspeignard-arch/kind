@@ -225,3 +225,59 @@ export function indicateursVitesse(texte, { arrets = [], intervalles = null, opt
   if (pics !== 'off') r.vitesse_max_kmh = pyRound(Math.max(...idx.map(i => vs[i])) * 3.6);
   return r;
 }
+
+// ---------- accostage et départ d'arrêt (docs/INDICATEURS.md, point 3) ----------
+// Arrêts desservis : le bus s'arrête (vitesse lissée ≤ 3 km/h) à 30 m au plus d'un arrêt GTFS.
+// Les événements notés à 150 m au plus d'un arrêt desservi, dans la minute qui précède l'arrivée,
+// forment l'accostage ; dans la minute qui suit le départ, le départ d'arrêt.
+// C'est là que les voyageurs sont debout (montée, descente, recherche d'une place).
+const RAYON_ACCOSTAGE_M = 150, FENETRE_ACCOSTAGE_S = 60, NOTES = [100, 70, 30, 0];
+
+export function arretsDesservis(texte, arrets) {
+  const brut = lireCsv(texte), garde = brut.t_s.map(t => t >= 5), d = {};
+  for (const c in brut) d[c] = brut[c].filter((_, i) => garde[i]);
+  const vs = lp(remplir(d.vitesse_kmh).map(x => x / 3.6), 0.15), lat = remplir(d.latitude), lon = remplir(d.longitude);
+  const res = [];
+  let cur = null;
+  for (let i = 0; i < vs.length; i++) {
+    let ici = null;
+    if (vs[i] * 3.6 <= V_ARRET_KMH) {
+      const p = { lat: lat[i], lon: lon[i] };
+      let best = null; for (const a of arrets) { const dd = dist2(p, a); if (dd <= RAYON_ARRET_M && (!best || dd < best.d)) best = { d: dd, a }; }
+      ici = best && best.a;
+    }
+    if (ici && cur && (cur.arret === ici || cur.arret.nom === ici.nom)) { cur.t_depart = d.t_s[i]; continue; }
+    if (cur) { res.push(cur); cur = null; }
+    if (ici) cur = { arret: ici, t_arrivee: d.t_s[i], t_depart: d.t_s[i] };
+  }
+  if (cur) res.push(cur);
+  return res;
+}
+
+export function accostage(texte, evenements, arrets) {
+  const desservis = arretsDesservis(texte, arrets), acc = [], dep = [];
+  for (const e of evenements) {
+    for (const s of desservis) {
+      if (dist2(e, s.arret) > RAYON_ACCOSTAGE_M) continue;
+      if (e.t <= s.t_arrivee && e.t >= s.t_arrivee - FENETRE_ACCOSTAGE_S) { acc.push(e); break; }
+      if (e.t >= s.t_depart && e.t <= s.t_depart + FENETRE_ACCOSTAGE_S) { dep.push(e); break; }
+    }
+  }
+  const resume = l => ({ nb: l.length, brusques: l.filter(e => e.niveau >= 2).length, note: l.length ? pyRound(mean(l.map(e => NOTES[e.niveau]))) : null });
+  return { arrets_desservis: desservis.length, accostage: resume(acc), depart: resume(dep) };
+}
+
+// ---------- qualité de la mesure (docs/INDICATEURS.md, point 3) ----------
+// Mesure douteuse si la corrélation avant-arrière avec le GPS est sous 0,6
+// ou si les trous de plus d'une seconde dépassent 5 % du temps.
+export function qualiteMesure(texte, analyse) {
+  const t = lireCsv(texte).t_s.filter(x => x >= 5);
+  let trous = 0, nb = 0;
+  for (let i = 1; i < t.length; i++) { const g = t[i] - t[i - 1]; if (g > 1) { trous += g; nb++; } }
+  const duree = t.length > 1 ? t[t.length - 1] - t[0] : 0, part = duree ? trous / duree : 0;
+  const raisons = [];
+  if (!(analyse.corr_avant >= 0.6)) raisons.push(`axe avant mal recalé sur le GPS (corrélation ${String(analyse.corr_avant).replace('.', ',')} < 0,6)`);
+  if (part > 0.05) raisons.push(`enregistrement coupé ${Math.round(part * 100)} % du temps (> 5 %)`);
+  return { corr_avant: analyse.corr_avant, corr_lateral: analyse.corr_lateral, nb_trous: nb, temps_trous_s: Math.round(trous),
+    part_trous: pyRound(part, 3), douteuse: raisons.length > 0, raisons };
+}

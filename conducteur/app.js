@@ -3,7 +3,7 @@
 // conduite (verre d'eau seul) → fin de service : ressenti avant le score → bilan.
 // Tout reste dans le téléphone (IndexedDB) ; Supabase viendra plus tard.
 import { creerMesure, distM, LOG_HEAD } from './mesure.js';
-import { analyseCsv, indicateursVitesse, PROF } from '../outils/analyse-csv.js';
+import { analyseCsv, indicateursVitesse, accostage, qualiteMesure, PROF } from '../outils/analyse-csv.js';
 import { lireOptions } from './options.js';
 const OPTIONS = lireOptions();
 
@@ -224,8 +224,8 @@ function csvService() { return LOG_HEAD + '\n' + E.log.map(r => r.join(',')).joi
 
 function calculerBilan() {
   if (!E.courses.length) return { erreur: 'Aucune course n’a été enregistrée : rien à noter.' };
-  let res;
-  try { res = analyseCsv(csvService()).profils[E.profil]; } catch (e) { return { erreur: 'Trajet trop court pour être noté.' }; }
+  let res, complet;
+  try { complet = analyseCsv(csvService()); res = complet.profils[E.profil]; } catch (e) { return { erreur: 'Trajet trop court pour être noté.' }; }
   const dans = ev => E.courses.findIndex(c => ev.t >= c.t_debut && ev.t <= c.t_fin);
   const evts = res.evenements.map(ev => ({ ...ev, course: dans(ev) })).filter(ev => ev.course >= 0);
   const NOTE = [100, 70, 30, 0], moy = l => l.length ? Math.round(l.reduce((s, e) => s + NOTE[e.niveau], 0) / l.length) : null;
@@ -233,12 +233,15 @@ function calculerBilan() {
   for (const c of ['freinage', 'accélération', 'virage']) { const l = evts.filter(e => e.crit === c); sous[c] = { nb: l.length, brusques: l.filter(e => e.niveau >= 2).length, note: moy(l) }; }
   const courses = E.courses.map((c, i) => { const l = evts.filter(e => e.course === i); return { ...c, score: moy(l), nb: l.length, brusques: l.filter(e => e.niveau >= 2).length }; });
   // indicateurs de vitesse sur les parties notées (les courses), arrêts de la ligne ou de tout le réseau
-  let vitesse = null;
-  try {
-    const arrets = (E.ligne ? [E.ligne] : reseau.lignes).flatMap(l => l.sens.flatMap(s => s.arrets));
-    vitesse = indicateursVitesse(csvService(), { arrets, intervalles: E.courses.map(c => [c.t_debut, c.t_fin]), options: OPTIONS });
-  } catch (e) { /* pas assez de données de vitesse */ }
-  return { score: moy(evts), sous, courses, evts, vitesse };
+  let vitesse = null, aux = null, qualite = null;
+  const arrets = (E.ligne ? [E.ligne] : reseau.lignes).flatMap(l => l.sens.flatMap(s => s.arrets));
+  try { vitesse = indicateursVitesse(csvService(), { arrets, intervalles: E.courses.map(c => [c.t_debut, c.t_fin]), options: OPTIONS }); }
+  catch (e) { /* pas assez de données de vitesse */ }
+  // accostage et départ d'arrêt : événements notés à 150 m d'un arrêt desservi
+  try { aux = accostage(csvService(), evts, arrets); } catch (e) { /* pas de positions */ }
+  // qualité de la mesure, toujours affichée à côté du score
+  try { qualite = qualiteMesure(csvService(), complet); } catch (e) { /* rien */ }
+  return { score: moy(evts), sous, courses, evts, vitesse, aux, qualite };
 }
 
 function arretProche(ev) {
@@ -274,13 +277,16 @@ function afficherBilan() {
   if (passager()) {
     h += `<p>${E.ligne ? 'Destination : ' + esc(E.ligne.sens[E.sensIdx].destination) : 'Trajet libre'}${E.campagne ? ' · campagne ' + esc(E.campagne) : ''}.</p>`;
   }
-  h += `<p>${B.evts.length} freinages, accélérations et virages notés${B.score == null ? ' : aucun moment marquant' : ''}.</p></div></section>`;
+  h += `<p>${B.evts.length} freinages, accélérations et virages notés${B.score == null ? ' : aucun moment marquant' : ''}.</p>`;
+  if (B.qualite) h += pastilleQualite(B.qualite);
+  h += '</div></section>';
   h += '<section class="sous">';
   for (const [c, lab, ic] of [['freinage', 'Freinages', 'freinage'], ['accélération', 'Accélérations', 'accélération'], ['virage', 'Virages', 'vd']]) {
     const s = B.sous[c];
     h += `<div class="carte">${icone(ic, '#1F4E79')}<span class="lab">${lab}</span><b>${s.note ?? '–'}</b><small>${s.nb} notés · ${s.brusques} brusque${s.brusques > 1 ? 's' : ''}</small></div>`;
   }
   h += '</section>';
+  if (B.aux) h += blocArrets(B.aux);
   if (B.vitesse) h += blocVitesse(B.vitesse);
   if (E.mode === 'ligne' && !passager()) {
     h += '<h2>Courses</h2><ul class="liste">';
@@ -304,6 +310,21 @@ function afficherBilan() {
   enregistrerBilan(B);
   montrer('ecranBilan');
 }
+// qualité de la mesure, à côté du score (docs/INDICATEURS.md, point 3)
+function pastilleQualite(q) {
+  const v = x => x == null || isNaN(x) ? '–' : x.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const detail = `recalage GPS ${v(q.corr_avant)} · coupures ${q.nb_trous ? `${q.temps_trous_s} s (${Math.round(q.part_trous * 100)} %)` : 'aucune'}`;
+  return `<p class="qualite ${q.douteuse ? 'douteuse' : 'fiable'}"><b>${q.douteuse ? 'Mesure douteuse' : 'Mesure fiable'}</b> · ${detail}` +
+    (q.douteuse ? `<br>${q.raisons.map(esc).join(' ; ')}. Score à prendre avec prudence.` : '') + '</p>';
+}
+// accostage et départ d'arrêt : là où les voyageurs sont debout
+function blocArrets(a) {
+  let h = '<section class="carte vitesse"><h2>Aux arrêts</h2>';
+  if (!a.arrets_desservis) return h + '<p class="note" style="margin:0">Aucun arrêt desservi pendant ce trajet : pas de note d’accostage.</p></section>';
+  const ligne = (lab, r) => `<div><dt>${lab}</dt><dd>${r.note ?? '–'}${r.note != null ? '<small>/100</small>' : ''}<span class="det">${r.nb} noté${r.nb > 1 ? 's' : ''}${r.brusques ? ` · ${r.brusques} brusque${r.brusques > 1 ? 's' : ''}` : ''}</span></dd></div>`;
+  h += '<dl>' + ligne('Accostages', a.accostage) + ligne('Départs d’arrêt', a.depart) + '</dl>';
+  return h + `<p class="note">${a.arrets_desservis} arrêt${a.arrets_desservis > 1 ? 's' : ''} desservi${a.arrets_desservis > 1 ? 's' : ''} · freinages, accélérations et virages à 150 m de l’arrêt.</p></section>`;
+}
 // vitesse commerciale, vitesse de roulage et temps à l'arrêt (docs/INDICATEURS.md, point 1)
 const kmh = x => x == null ? '–' : `${x.toLocaleString('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} km/h`;
 const duree = s => s < 60 ? `${s} s` : `${Math.floor(s / 60)} min${s % 60 ? ' ' + String(s % 60).padStart(2, '0') + ' s' : ''}`;
@@ -323,7 +344,7 @@ function blocVitesse(v) {
   return h + '</section>';
 }
 function enregistrerBilan(B) {
-  E.bilan = B.erreur ? { erreur: B.erreur } : { score: B.score, sous: B.sous, vitesse: B.vitesse || null, courses: B.courses.map(({ n, t_debut, t_fin, score, destination }) => ({ n, t_debut, t_fin, score, destination })) };
+  E.bilan = B.erreur ? { erreur: B.erreur } : { score: B.score, sous: B.sous, vitesse: B.vitesse || null, arrets: B.aux || null, qualite: B.qualite || null, courses: B.courses.map(({ n, t_debut, t_fin, score, destination }) => ({ n, t_debut, t_fin, score, destination })) };
   sauver().catch(() => {});
 }
 
