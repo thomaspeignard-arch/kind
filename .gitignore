@@ -1,0 +1,8 @@
+# Archive de départ (copie de sauvegarde, reste sur le PC)
+kind-starter.zip
+
+# Données réelles : ne pas publier (dépôt public pour GitHub Pages)
+data/
+
+# Article scientifique protégé par le droit d'auteur
+docs/*.pdf
