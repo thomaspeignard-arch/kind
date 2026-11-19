@@ -21,6 +21,7 @@ const ICO = {
 };
 const icone = (k, c = 'currentColor') => `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICO[k]}</svg>`;
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const dix = x => x.toLocaleString('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });   // 7.5 → « 7,5 »
 const heure = d => d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
 
 let reseau = null;
@@ -188,7 +189,7 @@ function finService() {
   arreterCapteurs();
   if (E.enCourse) finCourse(E.tDernier, false);
   E.termine = true; sauver().catch(() => {});
-  $('ressenti').value = 50; $('ressentiVal').textContent = '–'; $('ressenti').dataset.touche = '';
+  $('ressenti').value = 5; $('ressentiVal').innerHTML = '–<small>/10</small>'; $('ressenti').dataset.touche = '';
   $('voirBilan').disabled = true;
   montrer('ecranRessenti');
 }
@@ -196,7 +197,11 @@ function finService() {
 // ---------- ressenti puis bilan ----------
 function initRessenti() {
   const r = $('ressenti');
-  r.addEventListener('input', () => { r.dataset.touche = '1'; $('ressentiVal').textContent = r.value; $('voirBilan').disabled = false; });
+  // ressenti sur 10, au dixième près
+  const maj = () => { r.dataset.touche = '1'; $('ressentiVal').innerHTML = `${dix(+r.value)}<small>/10</small>`; $('voirBilan').disabled = false; };
+  r.addEventListener('input', maj);
+  const pas = d => { r.value = Math.min(10, Math.max(0, Math.round((+r.value + d) * 10) / 10)); maj(); };
+  $('moins').addEventListener('click', () => pas(-0.1)); $('plus').addEventListener('click', () => pas(0.1));
   $('voirBilan').addEventListener('click', () => { E.ressenti = +r.value; afficherBilan(); });
   $('passer').addEventListener('click', () => { E.ressenti = null; afficherBilan(); });
 }
@@ -242,8 +247,9 @@ function afficherBilan() {
   const mot = sc >= 85 ? 'Conduite très douce' : sc >= 70 ? 'Conduite douce' : sc >= 50 ? 'À améliorer' : 'Conduite brusque';
   let h = `<section class="carte score"><div class="gros" style="color:${coulSc}">${sc}<small>/100</small></div><div><b>${mot}</b>`;
   if (E.ressenti != null) {
-    const d = E.ressenti - sc;
-    h += `<p>Votre ressenti : <b>${E.ressenti}</b>. ${Math.abs(d) <= 5 ? 'Très proche de la mesure.' : `${Math.abs(d)} points ${d > 0 ? 'au-dessus' : 'en dessous'} de la mesure.`}</p>`;
+    // le ressenti est sur 10 : on ramène la mesure sur 10 pour comparer
+    const d = Math.round((E.ressenti - sc / 10) * 10) / 10;
+    h += `<p>Votre ressenti : <b>${dix(E.ressenti)}/10</b>, mesure : ${dix(sc / 10)}/10. ${Math.abs(d) <= 0.5 ? 'Très proche de la mesure.' : `${dix(Math.abs(d))} point${Math.abs(d) >= 2 ? 's' : ''} ${d > 0 ? 'au-dessus' : 'en dessous'} de la mesure.`}</p>`;
   }
   if (E.mode === 'passager') {
     h += `<p>Destination : ${esc(E.ligne.sens[E.sensIdx].destination)}${E.campagne ? ' · campagne ' + esc(E.campagne) : ''}.</p>`;

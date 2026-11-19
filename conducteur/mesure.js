@@ -14,6 +14,7 @@ export function distM(a, b) {
 }
 const bearingDeg = (a, b) => (Math.atan2((b.lon - a.lon) * Math.cos((a.lat + b.lat) / 2 * Math.PI / 180), b.lat - a.lat) * 180 / Math.PI + 360) % 360;
 const JSTEP = 0.2;
+const TAU_BIAIS = 1 / (2 * Math.PI * 0.05);   // passe-bas à 0,05 Hz pour les biais lents (≈ 3,2 s)
 
 // onEchantillon({t, lon, lat, mag, jerk, known, speed, gps}) est appelé à chaque mesure ;
 // niveau() renvoie le niveau affiché, enregistré dans le journal à 5 Hz.
@@ -46,8 +47,15 @@ export function creerMesure({ onEchantillon, onStatut, niveau }) {
       J.val = Math.hypot(cur[0] - J.prev[0], cur[1] - J.prev[1]) / JSTEP; J.prev = cur; J.t = tt;
     }
     S.sumIdx.m1 += a1; S.sumIdx.m2 += a2; S.sumIdx.n++;
+    S.sumRaw.r1 += S.lp[0]; S.sumRaw.r2 += S.lp[1]; S.sumRaw.n++;
     let lon = 0, lat = 0, known = false;
-    if (S.fwd) { lon = S.fwd[0] * a1 + S.fwd[1] * a2; lat = (S.latSign.s >= 0 ? 1 : -1) * (-S.fwd[1] * a1 + S.fwd[0] * a2); known = true; }
+    if (S.fwd) {
+      // biais lents (pente, dévers) retirés par comparaison au GPS quand il est disponible, sinon passe-haut de 15 s
+      const gpsOk = S.gb.n >= 5 && S.gps && Date.now() / 1000 - S.gps.t < 3, r = gpsOk ? S.lp : [a1, a2], sg = S.latSign.s >= 0 ? 1 : -1;
+      lon = S.fwd[0] * r[0] + S.fwd[1] * r[1]; lat = sg * (-S.fwd[1] * r[0] + S.fwd[0] * r[1]);
+      if (gpsOk) { lon -= S.gb.L; lat -= S.gb.T; }
+      known = true;
+    }
     const speed = S.gps ? S.gps.speed : null;
     onEchantillon({ t: now - t0, lon, lat, mag, jerk: J.val, known, speed, gps: S.gps });
     if (!S.lastLog || now - S.lastLog >= 0.2) {
@@ -63,11 +71,20 @@ export function creerMesure({ onEchantillon, onStatut, niveau }) {
     const prev = S.gps; S.gps = cur;
     const n = S.sumIdx.n, m1 = n ? S.sumIdx.m1 / n : 0, m2 = n ? S.sumIdx.m2 / n : 0;
     S.sumIdx = { m1: 0, m2: 0, n: 0 };
+    const nr = S.sumRaw.n, r1 = nr ? S.sumRaw.r1 / nr : 0, r2 = nr ? S.sumRaw.r2 / nr : 0; S.sumRaw = { r1: 0, r2: 0, n: 0 };
     if (n) { S.hist.push({ t, m1, m2 }); if (S.hist.length > 30) S.hist.shift(); }
     learnLatSign(cur);
     if (!prev || cur.speed == null || prev.speed == null || !n) return;
     const dt = t - prev.t; if (dt < 0.5 || dt > 3) return;
     const aGps = (cur.speed - prev.speed) / dt;
+    // biais lents : passe-bas à 0,05 Hz de l'écart entre l'accélération mesurée et celle déduite du GPS
+    if (S.fwd && nr) {
+      const sg = S.latSign.s >= 0 ? 1 : -1, Lr = S.fwd[0] * r1 + S.fwd[1] * r2, Tr = sg * (-S.fwd[1] * r1 + S.fwd[0] * r2), k = dt / (TAU_BIAIS + dt);
+      S.gb.L += k * (Lr - aGps - S.gb.L);
+      const cent = cur.speed < 0.3 ? 0 : (S.centGps && t - S.centGps.t < 4 ? S.centGps.v : null);
+      if (cent != null) S.gb.T += k * (Tr - cent - S.gb.T);
+      S.gb.n++;
+    }
     if (cur.speed > 2 && Math.abs(aGps) > 0.25) {
       const R = S.reg; R.a += m1 * m1; R.b += m1 * m2; R.c += m2 * m2; R.d += m1 * aGps; R.e += m2 * aGps; R.n++;
       const det = R.a * R.c - R.b * R.b;
@@ -86,6 +103,7 @@ export function creerMesure({ onEchantillon, onStatut, niveau }) {
     const pts = S.hist.filter(p => p.t > prevSeg.t && p.t <= cur.t); if (!pts.length) return;
     const m1 = pts.reduce((s, p) => s + p.m1, 0) / pts.length, m2 = pts.reduce((s, p) => s + p.m2, 0) / pts.length;
     const cent = cur.speed * dh * Math.PI / 180 / span, latRaw = -S.fwd[1] * m1 + S.fwd[0] * m2;
+    S.centGps = { t: cur.t, v: cent };   // accélération de virage vue par le GPS, pour les biais lents
     if (Math.abs(cent) > 0.8) { S.latSign.s += Math.sign(cent * latRaw); S.latSign.n++; }
   }
 
@@ -104,7 +122,8 @@ export function creerMesure({ onEchantillon, onStatut, niveau }) {
       t0 = performance.now() / 1000;
       Object.assign(S, { up: null, calib: [], calibUntil: t0 + 3, last: null, lp: [0, 0], lp1: [0, 0], bias: [0, 0], fwd: null,
         sumIdx: { m1: 0, m2: 0, n: 0 }, reg: { a: 0, b: 0, c: 0, d: 0, e: 0, n: 0 }, latSign: { s: 0, n: 0 },
-        jk: { t: null, prev: null, val: 0 }, anchor: null, seg: null, hist: [], gps: null, lastLog: 0 });
+        jk: { t: null, prev: null, val: 0 }, anchor: null, seg: null, hist: [], gps: null, lastLog: 0,
+        sumRaw: { r1: 0, r2: 0, n: 0 }, gb: { L: 0, T: 0, n: 0 }, centGps: null });
       log.length = 0; actif = true;
       window.addEventListener('devicemotion', onMotion);
       if ('geolocation' in navigator) watch = navigator.geolocation.watchPosition(onGps, () => onStatut('GPS indisponible : les courses ne seront pas reconnues automatiquement.'), { enableHighAccuracy: true, maximumAge: 0 });

@@ -63,7 +63,10 @@ button:disabled{opacity:.45;cursor:default}
 @media (prefers-reduced-motion:reduce){#scene{transition:none}}
 
 /* ressenti */
-.ressenti-val{font-size:56px;font-weight:600;text-align:center;font-variant-numeric:tabular-nums;color:var(--accent)}
+.ressenti-val{font-size:56px;font-weight:600;text-align:center;font-variant-numeric:tabular-nums;color:var(--accent);min-width:3.2ch}
+.ressenti-val small{font-size:18px;color:var(--second);font-weight:400}
+.reglage{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.reglage button{min-width:64px}
 input[type=range]{width:100%;accent-color:var(--accent);min-height:44px}
 .echelle{display:flex;justify-content:space-between;color:var(--second);font-size:14px}
 
@@ -173,9 +176,13 @@ details p{margin:10px 0 0;color:var(--second);font-size:15px}
   <h1 id="titreRessenti">Avant de voir votre score</h1>
   <p id="questionRessenti">Selon vous, quel score mérite votre conduite de ce service ?</p>
   <div class="carte">
-    <div id="ressentiVal" class="ressenti-val" aria-hidden="true">–</div>
-    <input id="ressenti" type="range" min="0" max="100" step="5" value="50" aria-labelledby="questionRessenti">
-    <div class="echelle"><span>0 · très brusque</span><span>100 · très douce</span></div>
+    <div class="reglage">
+      <button id="moins" type="button" aria-label="Retirer un dixième">−0,1</button>
+      <div id="ressentiVal" class="ressenti-val" aria-hidden="true">–<small>/10</small></div>
+      <button id="plus" type="button" aria-label="Ajouter un dixième">+0,1</button>
+    </div>
+    <input id="ressenti" type="range" min="0" max="10" step="0.1" value="5" aria-labelledby="questionRessenti">
+    <div class="echelle"><span>0 · très brusque</span><span>10 · très douce</span></div>
   </div>
   <div class="actions" style="margin-top:16px">
     <button id="voirBilan" class="principal" type="button" disabled>Voir mon bilan</button>

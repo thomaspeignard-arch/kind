@@ -39,6 +39,9 @@ def analyse(path):
     rl = np.corrcoef(lp(Lt, 0.3)[m3], cent[m3])[0, 1]
     if rl < 0:
         Lt = -Lt  # positif = virage à droite
+    # Biais lents (pente, dévers, inclinaison résiduelle du support) : ce que le GPS ne voit pas
+    L = L - lp(L - agps, 0.05)
+    Lt = Lt - lp(Lt - cent, 0.05)
     J = np.abs(np.gradient(lp(L, 1.0), 1 / FS))
 
     def episodes(s, seuil=0.6, mind=1.0, gap=1.0):

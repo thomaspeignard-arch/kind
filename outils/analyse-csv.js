@@ -98,7 +98,7 @@ export function analyseCsv(texte) {
     if (r >= corr) { corr = r; ang = a; }
   }
   const th = ang * Math.PI / 180;
-  const L = h1.map((x, i) => Math.cos(th) * x + Math.sin(th) * h2[i]);
+  let L = h1.map((x, i) => Math.cos(th) * x + Math.sin(th) * h2[i]);
   let Lt = h1.map((x, i) => -Math.sin(th) * x + Math.cos(th) * h2[i]);
   // cap calculé depuis les positions GPS lissées (pas de coords.heading)
   const lat = remplir(d.latitude), lon = remplir(d.longitude), latMoy = mean(lat);
@@ -110,6 +110,9 @@ export function analyseCsv(texte) {
   const m3 = vs.map(s => s > 3);
   const rl = corrcoef(lp(Lt, 0.3), cent, m3);
   if (rl < 0) Lt = Lt.map(z => -z);   // positif = virage à droite
+  // biais lents (pente, dévers, inclinaison résiduelle du support) : ce que le GPS ne voit pas
+  const bL = lp(L.map((z, i) => z - agps[i]), 0.05), bT = lp(Lt.map((z, i) => z - cent[i]), 0.05);
+  L = L.map((z, i) => z - bL[i]); Lt = Lt.map((z, i) => z - bT[i]);
   // à-coup : valeur absolue de la dérivée du signal avant-arrière filtré à 1 Hz
   const J = gradient(lp(L, 1.0), 1 / FS).map(Math.abs);
 
