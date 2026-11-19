@@ -1,5 +1,10 @@
 # Mettre en place Supabase pour Kind
 
+> **État au 19 novembre 2026** : le projet `kind` existe (Paris, eu-west-3), créé par Claude avec le
+> connecteur Supabase. Les étapes 1, 3 et 6 sont faites ; l'adresse et la clé publique sont dans
+> `commun/supabase-config.js`. Restent les étapes 2 (réglages de connexion), 4 (comptes) et 5 (rôles,
+> que Claude peut faire une fois les comptes créés).
+
 Environ 20 minutes, dans votre navigateur, sur https://supabase.com. Rien à installer.
 
 **À ne jamais envoyer à personne, ni à Claude** : le mot de passe de la base de données, la clé

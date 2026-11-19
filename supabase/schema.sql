@@ -47,14 +47,20 @@ create table if not exists profils (
   cree_le         timestamptz not null default now()
 );
 
--- fonctions d'aide aux règles d'accès (security definer : évite que les règles se lisent elles-mêmes en boucle)
-create or replace function public.mon_role(r text) returns text
+-- fonctions d'aide aux règles d'accès (security definer : évite que les règles se lisent elles-mêmes en boucle),
+-- dans un schéma « prive » que l'API n'expose pas
+create schema if not exists prive;
+grant usage on schema prive to anon, authenticated;
+create or replace function prive.mon_role(r text) returns text
   language sql stable security definer set search_path = public as
-$$ select role from profils where user_id = auth.uid() and reseau_id = r $$;
-
-create or replace function public.mon_reseau() returns text
+$$ select role from public.profils where user_id = auth.uid() and reseau_id = r $$;
+create or replace function prive.mon_reseau() returns text
   language sql stable security definer set search_path = public as
-$$ select reseau_id from profils where user_id = auth.uid() $$;
+$$ select reseau_id from public.profils where user_id = auth.uid() $$;
+revoke all on function prive.mon_role(text) from public;
+revoke all on function prive.mon_reseau() from public;
+grant execute on function prive.mon_role(text) to anon, authenticated;
+grant execute on function prive.mon_reseau() to anon, authenticated;
 
 -- ---------- trajets ----------
 -- Un trajet = un service conducteur ou un trajet passager, avec ses résultats calculés dans le téléphone.
@@ -146,7 +152,7 @@ create policy corriger on trajets for update using (auteur = auth.uid())
   with check (auteur = auth.uid() and (role = 'passager' or exists (select 1 from profils p where p.user_id = auth.uid()
               and p.role = 'conducteur' and p.code_conducteur = trajets.code_conducteur and p.reseau_id = trajets.reseau_id)));
 drop policy if exists lire on trajets;
-create policy lire on trajets for select using (auteur = auth.uid() or mon_role(reseau_id) = 'responsable');
+create policy lire on trajets for select using (auteur = auth.uid() or prive.mon_role(reseau_id) = 'responsable');
 
 -- courses et événements suivent leur trajet
 drop policy if exists envoyer on courses;
@@ -154,32 +160,35 @@ create policy envoyer on courses for insert with check (exists (select 1 from tr
 drop policy if exists remplacer on courses;
 create policy remplacer on courses for delete using (exists (select 1 from trajets t where t.id = trajet_id and t.auteur = auth.uid()));
 drop policy if exists lire on courses;
-create policy lire on courses for select using (exists (select 1 from trajets t where t.id = trajet_id and (t.auteur = auth.uid() or mon_role(t.reseau_id) = 'responsable')));
+create policy lire on courses for select using (exists (select 1 from trajets t where t.id = trajet_id and (t.auteur = auth.uid() or prive.mon_role(t.reseau_id) = 'responsable')));
 
 drop policy if exists envoyer on evenements;
 create policy envoyer on evenements for insert with check (exists (select 1 from trajets t where t.id = trajet_id and t.auteur = auth.uid()));
 drop policy if exists remplacer on evenements;
 create policy remplacer on evenements for delete using (exists (select 1 from trajets t where t.id = trajet_id and t.auteur = auth.uid()));
 drop policy if exists lire on evenements;
-create policy lire on evenements for select using (exists (select 1 from trajets t where t.id = trajet_id and (t.auteur = auth.uid() or mon_role(t.reseau_id) = 'responsable')));
+create policy lire on evenements for select using (exists (select 1 from trajets t where t.id = trajet_id and (t.auteur = auth.uid() or prive.mon_role(t.reseau_id) = 'responsable')));
 
--- ---------- vue agrégée pour l'autorité organisatrice ----------
+-- ---------- moyennes par ligne pour l'autorité organisatrice ----------
 -- Par ligne et par mois, hors tests et démos, à partir de 5 trajets. Sans conducteur ni trajet individuel.
--- La vue s'exécute avec les droits de son créateur : elle ne renvoie que le réseau de la personne connectée
--- (responsable ou ao).
-create or replace view ao_lignes with (security_invoker = false) as
-select t.reseau_id, t.ligne_id, date_trunc('month', t.debut)::date as mois,
-       count(*)                                                    as trajets,
-       round(avg(t.score))                                         as score_moyen,
-       round(avg((t.vitesse->>'vitesse_commerciale_kmh')::numeric), 1) as vitesse_commerciale_kmh,
-       round(avg((t.qualite->>'douteuse')::boolean::int) * 100)    as part_mesures_douteuses
-from trajets t
-where t.mode <> 'test' and not t.simulation and t.ligne_id is not null
-  and t.reseau_id = mon_reseau() and mon_role(t.reseau_id) in ('responsable', 'ao')
-group by 1, 2, 3
-having count(*) >= 5;
-revoke all on ao_lignes from anon;
-grant select on ao_lignes to authenticated;
+-- Fonction réservée aux comptes connectés (appel : rpc('resultats_lignes')) ; elle vérifie le rôle
+-- (responsable ou ao) et ne renvoie que le réseau de la personne connectée.
+create or replace function public.resultats_lignes()
+  returns table (ligne_id text, mois date, trajets bigint, score_moyen numeric, vitesse_commerciale_kmh numeric, part_mesures_douteuses numeric)
+  language sql stable security definer set search_path = public as
+$$
+  select t.ligne_id, date_trunc('month', t.debut)::date, count(*), round(avg(t.score)),
+         round(avg((t.vitesse->>'vitesse_commerciale_kmh')::numeric), 1),
+         round(avg((t.qualite->>'douteuse')::boolean::int) * 100)
+  from trajets t
+  where t.mode <> 'test' and not t.simulation and t.ligne_id is not null
+    and t.reseau_id = prive.mon_reseau() and prive.mon_role(t.reseau_id) in ('responsable', 'ao')
+  group by 1, 2
+  having count(*) >= 5
+  order by 2 desc, 1
+$$;
+revoke all on function public.resultats_lignes() from public, anon;
+grant execute on function public.resultats_lignes() to authenticated;
 
 -- ---------- stockage des données brutes ----------
 -- Seau privé « trajets-bruts » : chaque auteur dépose ses CSV compressés dans un dossier à son identifiant ;
@@ -191,4 +200,4 @@ create policy "deposer ses donnees brutes" on storage.objects for insert to auth
 drop policy if exists "relire les donnees brutes" on storage.objects;
 create policy "relire les donnees brutes" on storage.objects for select to authenticated
   using (bucket_id = 'trajets-bruts' and ((storage.foldername(name))[1] = auth.uid()::text
-         or exists (select 1 from trajets t where t.fichier_brut = name and mon_role(t.reseau_id) = 'responsable')));
+         or exists (select 1 from public.trajets t where t.fichier_brut = name and prive.mon_role(t.reseau_id) = 'responsable')));
