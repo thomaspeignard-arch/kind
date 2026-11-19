@@ -387,6 +387,7 @@ async function init() {
   $('recommencer').addEventListener('click', recommencer);
   $('partager').addEventListener('click', partager);
   $('nouveau').addEventListener('click', () => montrer('ecranService'));
+  $('menuBilan').addEventListener('click', () => montrer('ecranId'));
   try { reseau = await (await fetch('reseau-imagine.json')).json(); initService(); }
   catch (e) { erreur('erreurId', 'Impossible de charger les lignes du réseau. Vérifiez la connexion puis rechargez la page.'); }
 }
