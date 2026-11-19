@@ -112,8 +112,8 @@ export function analyseCsv(texte, profil = 'bus', opts = {}) {
   lon = lon.map((x, i) => x - bl[i]); lat = lat.map((x, i) => x - bt[i]);
   // à-coup : dérivée de l'accélération filtrée à 1 Hz, sur la grille fixe à 5 Hz.
   // 'combine' (comme la page en direct) : norme des deux axes ; 'longitudinal' : comme la référence Python.
-  const f1 = butter(2, 1.0, FS), jl = gradient(filtfilt(f1, lon), 1 / FS);
-  const jt = gradient(filtfilt(f1, lat), 1 / FS);
+  const f1 = butter(opts.ordreJerk || 2, 1.0, FS), lp = opts.allerSimple ? x => lfilter(f1, x) : x => filtfilt(f1, x);
+  const jl = gradient(lp(lon), 1 / FS), jt = gradient(lp(lat), 1 / FS);
   const jerk = opts.jerk === 'longitudinal' ? jl.map(Math.abs) : jl.map((x, i) => Math.hypot(x, jt[i]));
 
   // série « valide » ; sous 3 km/h on ignore tout (manipulation du téléphone à l'arrêt)
