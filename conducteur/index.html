@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#F6F6F4">
+<title>Kind — conducteur et passager</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --fond:#F6F6F4; --carte:#FFFFFF; --bord:#E2E2DD; --texte:#1C1F23; --second:#646A72; --accent:#1F4E79;
+  --doux:#3B82C4; --limite:#D4A017; --brusque:#E07B39; --tres:#C0392B; --bon:#3F8F6B;
+  --nuit:#0A1422; --nuit-ligne:#2A3D57; --nuit-texte:#F4EFE6; --nuit-second:#A9B4C4;
+  --police:'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  color-scheme: light;
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--fond);color:var(--texte);font-family:var(--police);font-size:17px;line-height:1.45}
+body.nuit{background:var(--nuit);color:var(--nuit-texte);overscroll-behavior:none}
+.ecran{max-width:560px;margin:0 auto;padding:calc(env(safe-area-inset-top) + 20px) 16px calc(env(safe-area-inset-bottom) + 24px)}
+h1{font-size:26px;font-weight:600;margin:0 0 4px}
+h2{font-size:19px;font-weight:600;margin:24px 0 10px}
+h1:focus,h2:focus{outline:none}
+p{margin:0 0 12px}
+.second{color:var(--second)}
+.carte{background:var(--carte);border:1px solid var(--bord);border-radius:8px;padding:14px 16px}
+form{display:flex;flex-direction:column;gap:16px}
+label.champ{display:flex;flex-direction:column;gap:6px;font-weight:500}
+input[type=text],input[type=password],select{font:inherit;font-weight:400;border:1px solid var(--bord);border-radius:6px;padding:12px;background:var(--carte);color:var(--texte);min-height:48px;width:100%}
+input:focus-visible,select:focus-visible,button:focus-visible,summary:focus-visible,.choix:focus-within{outline:3px solid var(--doux);outline-offset:2px}
+fieldset{border:0;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+legend{font-weight:500;margin-bottom:8px;padding:0}
+.choix{display:flex;gap:12px;align-items:flex-start;background:var(--carte);border:1px solid var(--bord);border-radius:8px;padding:12px 14px;cursor:pointer}
+.choix:has(input:checked){border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.choix input{margin:4px 0 0;width:20px;height:20px;accent-color:var(--accent);flex:none}
+.choix span{display:flex;flex-direction:column}
+.choix small{color:var(--second);font-size:14px}
+.rangee{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.rangee .choix{padding:10px;align-items:center}
+button{font:inherit;font-weight:600;border:0;border-radius:8px;min-height:52px;padding:0 20px;cursor:pointer;background:var(--bord);color:var(--texte)}
+button.principal{background:var(--accent);color:#fff}
+button.lien{background:none;min-height:44px;padding:0;color:var(--accent);text-decoration:underline;font-weight:500}
+button:disabled{opacity:.45;cursor:default}
+.actions{display:flex;flex-direction:column;gap:10px}
+.erreur{color:var(--tres);font-weight:500;min-height:1em;margin:0}
+.entete{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:16px}
+.accueil{display:flex;flex-direction:column;gap:12px;margin-top:20px}
+.accueil .carte{display:flex;flex-direction:column;gap:12px}
+.hidden{display:none!important}
+
+/* conduite : écran de nuit, seul le verre d'eau compte */
+#ecranConduite{max-width:none;height:100dvh;display:flex;flex-direction:column;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+#scene{flex:1;position:relative;display:flex;align-items:center;justify-content:center;border-radius:24px;margin:10px;box-shadow:inset 0 0 0 4px #5FA8D3;transition:box-shadow .12s;overflow:hidden}
+#verre{width:min(72vw,56vh);height:auto}
+#puce{position:absolute;top:14px;left:14px;right:14px;text-align:center;font-size:15px;color:var(--nuit-second);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#puce.active{color:var(--nuit-texte);font-weight:600}
+#statut{position:absolute;bottom:14px;left:0;right:0;text-align:center;font-size:15px;color:var(--nuit-second);padding:0 16px}
+#barre{display:flex;gap:10px;justify-content:center;padding:0 10px 12px}
+#barre button{background:var(--nuit-ligne);color:var(--nuit-texte);border-radius:26px;flex:1;max-width:240px}
+@media (orientation:landscape){#verre{width:auto;height:min(60vh,70vw)}}
+@media (prefers-reduced-motion:reduce){#scene{transition:none}}
+
+/* ressenti */
+.ressenti-val{font-size:56px;font-weight:600;text-align:center;font-variant-numeric:tabular-nums;color:var(--accent)}
+input[type=range]{width:100%;accent-color:var(--accent);min-height:44px}
+.echelle{display:flex;justify-content:space-between;color:var(--second);font-size:14px}
+
+/* bilan */
+.bandeau{background:#FBF3DC;border:1px solid #EAD9A3;color:#6B5310;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:15px}
+.score{display:flex;gap:18px;align-items:center}
+.score .gros{font-size:64px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums}
+.score .gros small{font-size:18px;color:var(--second);font-weight:400}
+.score p{margin:6px 0 0;color:var(--second);font-size:15px}
+.sous{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+.sous .carte{display:flex;flex-direction:column;gap:2px;padding:12px}
+.sous .lab{font-size:14px;color:var(--second);margin-top:6px}
+.sous b{font-size:26px;font-variant-numeric:tabular-nums}
+.sous small{font-size:12px;color:var(--second)}
+.liste{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.liste li{display:flex;gap:12px;align-items:center}
+.liste li>div{flex:1;min-width:0;display:flex;flex-direction:column}
+.liste small{color:var(--second);font-size:14px}
+.liste .note{font-size:22px;font-variant-numeric:tabular-nums}
+.liste .mesure{text-align:right;font-variant-numeric:tabular-nums;font-weight:500;display:flex;flex-direction:column}
+details{margin-top:16px}
+summary{cursor:pointer;font-weight:500;min-height:28px}
+details p{margin:10px 0 0;color:var(--second);font-size:15px}
+@media (max-width:360px){.rangee{grid-template-columns:1fr}.sous{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<!-- 1. accueil : conducteur ou passager -->
+<main id="ecranId" class="ecran">
+  <h1>Kind</h1>
+  <p class="second">Mesure de la douceur de conduite. Prototype : les codes ne sont pas vérifiés et tout reste dans ce téléphone.</p>
+  <div class="accueil">
+    <form id="formId" class="carte" novalidate>
+      <h2 style="margin:0">Je suis conducteur</h2>
+      <label class="champ">Code conducteur
+        <input id="code" type="text" autocomplete="username" autocapitalize="characters" placeholder="par exemple C-1042"></label>
+      <label class="champ">Code PIN
+        <input id="pin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="4" placeholder="4 chiffres"></label>
+      <p id="erreurId" class="erreur" role="alert"></p>
+      <button class="principal" type="submit">Continuer</button>
+    </form>
+    <div class="carte">
+      <h2 style="margin:0">Je suis passager</h2>
+      <p class="second" style="margin:0">Mesurez le confort de votre trajet, même si vous montez en cours de ligne.</p>
+      <button id="passagerBtn" type="button">Mesurer mon trajet</button>
+    </div>
+  </div>
+</main>
+
+<!-- 2. choix du trajet -->
+<main id="ecranService" class="ecran hidden">
+  <div class="entete"><h1 id="titreService">Nouveau service</h1><button id="changer" class="lien" type="button">Changer</button></div>
+  <p id="bonjour" class="second"></p>
+  <form id="formService">
+    <fieldset id="blocMode">
+      <legend>Type de trajet</legend>
+      <label class="choix"><input type="radio" name="mode" value="ligne" checked><span><b>Ligne</b><small>Courses reconnues sur la ligne choisie</small></span></label>
+      <label class="choix"><input type="radio" name="mode" value="libre"><span><b>Trajet libre</b><small>Sans ligne, tout le trajet est noté</small></span></label>
+      <label class="choix"><input type="radio" name="mode" value="test"><span><b>Trajet de test</b><small>Noté mais non comptabilisé</small></span></label>
+    </fieldset>
+    <p id="noteMode" class="second" style="margin:-6px 0 0;font-size:15px"></p>
+    <div id="blocLigne" style="display:flex;flex-direction:column;gap:16px">
+      <label class="champ">Ligne <select id="ligne"></select></label>
+      <fieldset><legend>Sens</legend><div id="sens" style="display:flex;flex-direction:column;gap:8px"></div></fieldset>
+    </div>
+    <div id="blocVehicule" style="display:flex;flex-direction:column;gap:16px">
+      <label class="champ">Véhicule (facultatif) <input id="vehicule" type="text" placeholder="numéro de parc"></label>
+      <fieldset><legend>Profil</legend>
+        <div class="rangee">
+          <label class="choix"><input type="radio" name="profil" value="bus" checked><span><b>Bus</b></span></label>
+          <label class="choix"><input type="radio" name="profil" value="car"><span><b>Autocar</b></span></label>
+          <label class="choix"><input type="radio" name="profil" value="voiture"><span><b>Voiture</b></span></label>
+        </div>
+      </fieldset>
+    </div>
+    <label id="blocCampagne" class="champ hidden">Code de campagne (facultatif) <input id="campagne" type="text" autocapitalize="characters" placeholder="fourni par le réseau"></label>
+    <p id="conseil" class="second" style="font-size:15px;margin:0">Fixez le téléphone sur son support et ne le bougez plus. Au départ, restez immobile 3 secondes.</p>
+    <div class="actions">
+      <button id="demarrer" class="principal" type="submit">Démarrer le service</button>
+      <button id="demoBtn" type="button">Démo (bus simulé)</button>
+    </div>
+  </form>
+</main>
+
+<!-- 3. conduite -->
+<main id="ecranConduite" class="ecran hidden">
+  <h1 class="hidden">Conduite</h1>
+  <div id="scene">
+    <div id="puce" aria-live="polite"></div>
+    <svg id="verre" viewBox="0 0 220 220" role="img" aria-label="Verre d'eau qui réagit à la conduite">
+      <defs><clipPath id="gc"><path d="M55 20 L165 20 L154 188 Q153 200 141 200 L79 200 Q67 200 66 188 Z"/></clipPath></defs>
+      <g clip-path="url(#gc)"><g id="liquide"><rect id="liq" x="-60" y="110" width="340" height="220" fill="#5FA8D3"/><line x1="-60" y1="110" x2="280" y2="110" stroke="#E9F4FB" stroke-width="3"/></g></g>
+      <path d="M55 20 L165 20 L154 188 Q153 200 141 200 L79 200 Q67 200 66 188 Z" fill="none" stroke="#C9D1DC" stroke-width="5" stroke-linejoin="round"/>
+      <g id="gouttes" opacity="0"><circle cx="180" cy="26" r="7" fill="#FF8A50"/><circle cx="198" cy="8" r="5" fill="#FF8A50"/><circle cx="38" cy="30" r="6" fill="#FF8A50"/></g>
+    </svg>
+    <div id="statut" aria-live="polite"></div>
+  </div>
+  <div id="barre">
+    <button id="courseBtn" type="button">Début de course</button>
+    <button id="finService" type="button">Fin de service</button>
+  </div>
+</main>
+
+<!-- 4. ressenti, avant de voir le score -->
+<main id="ecranRessenti" class="ecran hidden">
+  <h1 id="titreRessenti">Avant de voir votre score</h1>
+  <p id="questionRessenti">Selon vous, quel score mérite votre conduite de ce service ?</p>
+  <div class="carte">
+    <div id="ressentiVal" class="ressenti-val" aria-hidden="true">–</div>
+    <input id="ressenti" type="range" min="0" max="100" step="5" value="50" aria-labelledby="questionRessenti">
+    <div class="echelle"><span>0 · très brusque</span><span>100 · très douce</span></div>
+  </div>
+  <div class="actions" style="margin-top:16px">
+    <button id="voirBilan" class="principal" type="button" disabled>Voir mon bilan</button>
+    <button id="passer" class="lien" type="button">Je préfère ne pas répondre</button>
+  </div>
+</main>
+
+<!-- 5. bilan -->
+<main id="ecranBilan" class="ecran hidden">
+  <h1 id="bilanTitre">Bilan</h1>
+  <p id="bilanSous" class="second"></p>
+  <div id="bandeauTest" class="bandeau hidden">Trajet de test : non comptabilisé.</div>
+  <div id="bilanCorps"></div>
+  <div class="actions" style="margin-top:20px">
+    <button id="partager" type="button">Partager les données (CSV)</button>
+    <button id="nouveau" class="principal" type="button">Nouveau trajet</button>
+  </div>
+</main>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
