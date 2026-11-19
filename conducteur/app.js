@@ -57,7 +57,7 @@ function initIdentification() {
 // le passager monte en cours de ligne : pas de type de trajet, de véhicule ni de profil, un code de campagne
 function configurerRole() {
   const p = passager();
-  $('blocMode').classList.toggle('hidden', p); $('blocVehicule').classList.toggle('hidden', p);
+  $('optTest').classList.toggle('hidden', p); if (p && document.querySelector('input[name=mode]:checked').value === 'test') document.querySelector('input[name=mode][value=ligne]').checked = true; $('blocVehicule').classList.toggle('hidden', p);
   $('blocCampagne').classList.toggle('hidden', !p);
   $('titreService').textContent = p ? 'Mon trajet' : 'Nouveau service';
   $('bonjour').textContent = p ? 'Choisissez la ligne et le sens du bus dans lequel vous montez.' : `Conducteur ${E.conducteur}`;
@@ -88,9 +88,11 @@ function initService() {
   $('changer').addEventListener('click', () => montrer('ecranId'));
 }
 function majMode() {
-  const m = passager() ? 'passager' : document.querySelector('input[name=mode]:checked').value;
-  $('blocLigne').classList.toggle('hidden', m !== 'ligne' && m !== 'passager');
-  $('noteMode').textContent = m === 'passager' ? 'La mesure commence tout de suite et s’arrête quand vous descendez.' : m === 'ligne' ? 'Le trajet jusqu’au premier arrêt n’est pas noté. Chaque course commence au premier arrêt de la ligne.'
+  const m = document.querySelector('input[name=mode]:checked').value;
+  $('blocLigne').classList.toggle('hidden', m !== 'ligne');
+  $('noteMode').textContent = passager()
+    ? (m === 'ligne' ? 'La mesure commence tout de suite, même en cours de ligne, et s’arrête quand vous descendez.' : 'Sans ligne : la mesure commence tout de suite et s’arrête quand vous descendez.')
+    : m === 'ligne' ? 'Le trajet jusqu’au premier arrêt n’est pas noté. Chaque course commence au premier arrêt de la ligne.'
     : m === 'libre' ? 'Tout le trajet est noté, du départ jusqu’à la fin du service.'
     : 'Trajet noté mais non comptabilisé, pour tester Kind. Pensez à partager les données à la fin.';
 }
@@ -105,12 +107,11 @@ function afficherSens() {
 
 // ---------- conduite ----------
 async function demarrerService(demo) {
-  E.mode = passager() ? 'passager' : document.querySelector('input[name=mode]:checked').value;
+  E.mode = document.querySelector('input[name=mode]:checked').value;
   E.profil = passager() ? 'bus' : document.querySelector('input[name=profil]:checked').value;
   E.vehicule = passager() ? '' : $('vehicule').value.trim();
   E.campagne = passager() ? $('campagne').value.trim() : '';
-  if (E.mode === 'passager') E.ligne = reseau.lignes.find(x => x.id === $('ligne').value);
-  else E.ligne = E.mode === 'ligne' ? reseau.lignes.find(x => x.id === $('ligne').value) : null;
+  E.ligne = E.mode === 'ligne' ? reseau.lignes.find(x => x.id === $('ligne').value) : null;
   E.sensIdx = E.ligne ? +document.querySelector('input[name=sens]:checked').value : 0;
   Object.assign(E, { debut: new Date(), courses: [], enCourse: null, tDernier: 0, gps: null, lvl: 0, lvlJusqua: 0, ressenti: null, termine: false, demo: null, simulation: false, bilan: null });
   E.id = E.debut.getTime(); E.estDemo = demo;
@@ -122,7 +123,7 @@ async function demarrerService(demo) {
     try { await E.mesure.demarrer(); } catch (e) { $('statut').textContent = e.message; return; }
     $('statut').textContent = 'Calibrage… restez immobile';
   }
-  if (E.mode !== 'ligne') debutCourse(0, false);
+  if (E.mode !== 'ligne' || passager()) debutCourse(0, false);
   E.sauvegarde = setInterval(() => sauver().catch(() => {}), 20000);
 }
 
@@ -150,7 +151,7 @@ function dessiner(lon, lat, mag, known) {
 
 // courses reconnues par le GTFS : début au premier arrêt du sens, fin au terminus
 function suivreCourse(t, gps) {
-  if (E.mode !== 'ligne') return;
+  if (E.mode !== 'ligne' || passager()) return;   // le passager monte en cours de ligne : mesure dès le départ
   const sens = E.ligne.sens[E.sensIdx], arr = sens.arrets;
   if (!E.enCourse) { if (distM(gps, arr[0]) <= RAYON_ARRET) debutCourse(t, true); return; }
   const c = E.enCourse;
@@ -172,7 +173,7 @@ function finCourse(t, auto) {
 }
 function majPuce() {
   const p = $('puce'), b = $('courseBtn');
-  if (E.mode === 'passager') { p.textContent = `Passager · ligne ${E.ligne.nom_court} → ${E.ligne.sens[E.sensIdx].destination}`; b.classList.add('hidden'); return; }
+  if (passager()) { p.textContent = E.ligne ? `Passager · ligne ${E.ligne.nom_court} → ${E.ligne.sens[E.sensIdx].destination}` : 'Passager · trajet libre'; b.classList.add('hidden'); return; }
   if (E.mode !== 'ligne') { p.textContent = E.mode === 'test' ? 'Trajet de test' : 'Trajet libre'; b.classList.add('hidden'); return; }
   b.classList.remove('hidden');
   const s = E.ligne.sens[E.sensIdx];
@@ -247,8 +248,8 @@ function arretProche(ev) {
 function afficherBilan() {
   const B = calculerBilan(), heureDe = t => heure(new Date(E.debut.getTime() + t * 1000));
   const fin = new Date(E.debut.getTime() + E.tDernier * 1000);
-  $('bilanTitre').textContent = E.mode === 'ligne' ? `Ligne ${E.ligne.nom_court}`
-    : E.mode === 'passager' ? `Ligne ${E.ligne.nom_court} · trajet passager` : NOMS_MODE[E.mode];
+  $('bilanTitre').textContent = passager() ? (E.ligne ? `Ligne ${E.ligne.nom_court} · trajet passager` : 'Trajet libre · passager')
+    : E.mode === 'ligne' ? `Ligne ${E.ligne.nom_court}` : NOMS_MODE[E.mode];
   $('bilanSous').textContent = `${E.debut.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })}, ${heure(E.debut)}–${heure(fin)}` +
     `${E.vehicule ? ' · véhicule ' + E.vehicule : ''} · ${NOMS_PROFIL[E.profil]}`;
   $('bandeauTest').classList.toggle('hidden', E.mode !== 'test');
@@ -262,8 +263,8 @@ function afficherBilan() {
     const d = Math.round((E.ressenti - sc / 10) * 10) / 10;
     h += `<p>Votre ressenti : <b>${dix(E.ressenti)}/10</b>, mesure : ${dix(sc / 10)}/10. ${Math.abs(d) <= 0.5 ? 'Très proche de la mesure.' : `${dix(Math.abs(d))} point${Math.abs(d) >= 2 ? 's' : ''} ${d > 0 ? 'au-dessus' : 'en dessous'} de la mesure.`}</p>`;
   }
-  if (E.mode === 'passager') {
-    h += `<p>Destination : ${esc(E.ligne.sens[E.sensIdx].destination)}${E.campagne ? ' · campagne ' + esc(E.campagne) : ''}.</p>`;
+  if (passager()) {
+    h += `<p>${E.ligne ? 'Destination : ' + esc(E.ligne.sens[E.sensIdx].destination) : 'Trajet libre'}${E.campagne ? ' · campagne ' + esc(E.campagne) : ''}.</p>`;
   }
   h += `<p>${B.evts.length} freinages, accélérations et virages notés${B.score == null ? ' : aucun moment marquant' : ''}.</p></div></section>`;
   h += '<section class="sous">';
@@ -272,13 +273,13 @@ function afficherBilan() {
     h += `<div class="carte">${icone(ic, '#1F4E79')}<span class="lab">${lab}</span><b>${s.note ?? '–'}</b><small>${s.nb} notés · ${s.brusques} brusque${s.brusques > 1 ? 's' : ''}</small></div>`;
   }
   h += '</section>';
-  if (E.mode === 'ligne') {
+  if (E.mode === 'ligne' && !passager()) {
     h += '<h2>Courses</h2><ul class="liste">';
     for (const c of B.courses) h += `<li class="carte"><div><b>Course ${c.n} · ${esc(E.ligne.nom_court)} → ${esc(c.destination)}</b><small>${heureDe(c.t_debut)}–${heureDe(c.t_fin)}${c.auto ? '' : ' · démarrée à la main'}</small></div><b class="note">${c.score ?? '–'}</b></li>`;
     h += '</ul>';
   }
   const aRevoir = B.evts.filter(e => e.niveau >= 2).sort((a, b) => b.niveau - a.niveau || Math.abs(b.pic) - Math.abs(a.pic)).slice(0, 8).sort((a, b) => a.t - b.t);
-  h += `<h2>${E.mode === 'passager' ? 'Moments inconfortables' : 'Moments à revoir'}</h2>`;
+  h += `<h2>${passager() ? 'Moments inconfortables' : 'Moments à revoir'}</h2>`;
   if (!aRevoir.length) h += '<p class="carte">Aucun moment brusque. Bravo !</p>';
   else {
     h += '<ul class="liste">';
@@ -334,8 +335,8 @@ function genererDemo() {
   let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
   const l = E.ligne || reseau.lignes.find(x => x.id === '01'), sens = l.sens[E.sensIdx];
   // conducteur : départ du dépôt, ~400 m avant le premier arrêt ; passager : monte au 4e arrêt
-  const pts = sens.arrets.slice(E.mode === 'passager' ? 3 : 0, 12).map(a => ({ lat: a.lat, lon: a.lon }));
-  const p0 = pts[0], dep = E.mode === 'passager' ? { ...p0 } : { lat: p0.lat - 0.0025, lon: p0.lon - 0.003 };
+  const pts = sens.arrets.slice(passager() && E.ligne ? 3 : 0, 12).map(a => ({ lat: a.lat, lon: a.lon }));
+  const p0 = pts[0], dep = passager() ? { ...p0 } : { lat: p0.lat - 0.0025, lon: p0.lon - 0.003 };
   const etapes = [dep, ...pts], rows = [], th = 30 * Math.PI / 180, FS = 5, dt = 1 / FS;
   let t = 0, v = 0, a = 0, pos = { ...dep };
   const pousser = (L, Lt, jerk) => {
