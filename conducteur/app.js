@@ -3,7 +3,7 @@
 // conduite (verre d'eau seul) → fin de service : ressenti avant le score → bilan.
 // Tout reste dans le téléphone (IndexedDB) ; Supabase viendra plus tard.
 import { creerMesure, distM, LOG_HEAD } from './mesure.js';
-import { analyseCsv, indicateursVitesse, accostage, qualiteMesure, PROF } from '../outils/analyse-csv.js';
+import { analyseCsv, indicateursVitesse, accostage, qualiteMesure, rattacherCourse, servicesDuJour, PROF } from '../outils/analyse-csv.js';
 import { lireOptions } from './options.js';
 const OPTIONS = lireOptions();
 
@@ -26,7 +26,8 @@ const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;'
 const dix = x => x.toLocaleString('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });   // 7.5 → « 7,5 »
 const heure = d => d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
 
-let reseau = null;
+let reseau = null, horaires = null;   // horaires GTFS : chargés en arrière-plan, pour la ponctualité
+const heureMin = m => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(Math.round(m % 60)).padStart(2, '0')}`;
 const E = { // état du service en cours
   role: 'conducteur', campagne: '', conducteur: '', vehicule: '', profil: 'bus', mode: 'ligne', ligne: null, sensIdx: 0,
   id: 0, debut: null, log: [], courses: [], enCourse: null, tDernier: 0, gps: null,
@@ -241,7 +242,15 @@ function calculerBilan() {
   try { aux = accostage(csvService(), evts, arrets); } catch (e) { /* pas de positions */ }
   // qualité de la mesure, toujours affichée à côté du score
   try { qualite = qualiteMesure(csvService(), complet); } catch (e) { /* rien */ }
-  return { score: moy(evts), sous, courses, evts, vitesse, aux, qualite };
+  // rattachement de chaque course à une course GTFS : ponctualité et inter-arrêts
+  let ponct = null;
+  if (horaires) ponct = E.courses.map(c => {
+    try {
+      return rattacherCourse(csvService(), horaires, { debut: E.debut, intervalle: [c.t_debut, c.t_fin],
+        route: E.ligne ? E.ligne.id : null, direction: E.ligne ? c.direction : null, options: OPTIONS });
+    } catch (e) { return { hors_service: true, raison: 'calcul impossible' }; }
+  });
+  return { score: moy(evts), sous, courses, evts, vitesse, aux, qualite, ponct };
 }
 
 function arretProche(ev) {
@@ -287,6 +296,7 @@ function afficherBilan() {
   }
   h += '</section>';
   if (B.aux) h += blocArrets(B.aux);
+  if (B.ponct) h += blocPonctualite(B.ponct, B.courses);
   if (B.vitesse) h += blocVitesse(B.vitesse);
   if (E.mode === 'ligne' && !passager()) {
     h += '<h2>Courses</h2><ul class="liste">';
@@ -317,6 +327,33 @@ function pastilleQualite(q) {
   return `<p class="qualite ${q.douteuse ? 'douteuse' : 'fiable'}"><b>${q.douteuse ? 'Mesure douteuse' : 'Mesure fiable'}</b> · ${detail}` +
     (q.douteuse ? `<br>${q.raisons.map(esc).join(' ; ')}. Score à prendre avec prudence.` : '') + '</p>';
 }
+// ponctualité : écart à l'horaire GTFS à chaque arrêt passé, et inter-arrêts (docs/INDICATEURS.md, point 4)
+const ecart = s => { const a = Math.abs(s), txt = a < 60 ? `${a} s` : `${Math.floor(a / 60)} min${a % 60 ? ' ' + String(a % 60).padStart(2, '0') : ''}`; return (s > 0 ? '+' : s < 0 ? '−' : '') + txt; };
+const STATUTS = { heure: 'à l’heure', avance: 'en avance', retard: 'en retard' };
+function blocPonctualite(liste, courses) {
+  let h = '<section class="carte vitesse ponct"><h2>Ponctualité</h2>';
+  liste.forEach((r, i) => {
+    const titre = liste.length > 1 ? `Course ${courses[i].n} : ` : '';
+    if (r.hors_service) { h += `<p class="note" style="margin:0 0 8px">${titre}hors service (${esc(r.raison)}). Pas de ponctualité pour ce trajet.</p>`; return; }
+    const c = r.course, p = r.ponctualite, nomLigne = (reseau.lignes.find(l => l.id === c.route_id) || {}).nom_court || c.route_id;
+    h += `<p style="margin:0 0 8px">${titre}rattaché à la course ${esc(nomLigne)} → ${esc(c.destination)} de ${heureMin(c.depart_prevu_min)}.</p>`;
+    h += `<dl><div><dt>À l’heure</dt><dd>${p.a_l_heure} arrêt${p.a_l_heure > 1 ? 's' : ''}</dd></div>`;
+    h += `<div><dt>En avance (> ${p.seuils.avance_s / 60} min)</dt><dd>${p.avance}</dd></div>`;
+    h += `<div><dt>En retard (> ${p.seuils.retard_s / 60} min)</dt><dd>${p.retard}</dd></div>`;
+    h += `<div><dt>Écart médian</dt><dd>${ecart(p.ecart_median_s)}</dd></div></dl>`;
+    h += `<details><summary>Détail par arrêt</summary><table><thead><tr><th>Arrêt</th><th>Prévu</th><th>Réel</th><th>Écart</th></tr></thead><tbody>`;
+    for (const a of r.arrets) h += `<tr class="${a.statut}"><td>${esc(a.nom)}</td><td>${heureMin(a.prevu_min)}</td><td>${heureMin(a.reel_s / 60)}</td><td title="${STATUTS[a.statut]}">${ecart(a.ecart_s)}</td></tr>`;
+    h += '</tbody></table>';
+    const lents = r.inter_arrets.filter(x => x.reel_s - x.prevu_s >= 30).sort((a, b) => (b.reel_s - b.prevu_s) - (a.reel_s - a.prevu_s)).slice(0, 3);
+    if (lents.length) {
+      h += '<p class="note">Inter-arrêts les plus lents par rapport à l’horaire :</p><ul class="lents">';
+      for (const x of lents) h += `<li>${esc(x.de)} → ${esc(x.a)} : ${duree(x.reel_s)} au lieu de ${duree(x.prevu_s)}</li>`;
+      h += '</ul>';
+    }
+    h += '</details>';
+  });
+  return h + '</section>';
+}
 // accostage et départ d'arrêt : là où les voyageurs sont debout
 function blocArrets(a) {
   let h = '<section class="carte vitesse"><h2>Aux arrêts</h2>';
@@ -344,7 +381,7 @@ function blocVitesse(v) {
   return h + '</section>';
 }
 function enregistrerBilan(B) {
-  E.bilan = B.erreur ? { erreur: B.erreur } : { score: B.score, sous: B.sous, vitesse: B.vitesse || null, arrets: B.aux || null, qualite: B.qualite || null, courses: B.courses.map(({ n, t_debut, t_fin, score, destination }) => ({ n, t_debut, t_fin, score, destination })) };
+  E.bilan = B.erreur ? { erreur: B.erreur } : { score: B.score, sous: B.sous, vitesse: B.vitesse || null, arrets: B.aux || null, qualite: B.qualite || null, ponctualite: B.ponct || null, courses: B.courses.map(({ n, t_debut, t_fin, score, destination }) => ({ n, t_debut, t_fin, score, destination })) };
   sauver().catch(() => {});
 }
 
@@ -383,7 +420,11 @@ function genererDemo() {
   let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
   const l = E.ligne || reseau.lignes.find(x => x.id === '01'), sens = l.sens[E.sensIdx];
   // conducteur : départ du dépôt, ~400 m avant le premier arrêt ; passager : monte au 4e arrêt
-  const pts = sens.arrets.slice(passager() && E.ligne ? 3 : 0, 12).map(a => ({ lat: a.lat, lon: a.lon }));
+  const premier = passager() && E.ligne ? 3 : 0;
+  const pts = sens.arrets.slice(premier, 12).map(a => ({ lat: a.lat, lon: a.lon }));
+  // calée sur une vraie course du jour si possible : le bus attend l'heure prévue à chaque arrêt, avec un peu de retard
+  const h = courseDuJourPourDemo(l, sens);
+  let base = null, retard = 10;
   const p0 = pts[0], dep = passager() ? { ...p0 } : { lat: p0.lat - 0.0025, lon: p0.lon - 0.003 };
   const etapes = [dep, ...pts], rows = [], th = 30 * Math.PI / 180, FS = 5, dt = 1 / FS;
   let t = 0, v = 0, a = 0, pos = { ...dep };
@@ -393,11 +434,11 @@ function genererDemo() {
   };
   for (let k = 0; k < 15; k++) pousser(0, 0, 0);   // calibrage à l'arrêt
   for (let s = 1; s < etapes.length; s++) {
-    const A = pos, B = etapes[s], d = distM(A, B); if (d < 5) continue;
+    const A = pos, B = etapes[s], d = distM(A, B);
     const accMax = 0.8 + rnd() * 1.6, frein = 0.8 + rnd() * 2.2, vmax = 9 + rnd() * 5, jmax = 1 + rnd() * 4;
     const virage = rnd() < 0.4 ? (rnd() < 0.5 ? -1 : 1) * (0.6 + rnd() * 2.2) : 0;
     let fait = 0;
-    while (fait < d - 0.5) {
+    while (d >= 5 && fait < d - 0.5) {
       const reste = d - fait, cible = v * v / (2 * frein) >= reste - 2 ? -frein : v < vmax ? accMax : 0;
       const aPrec = a; a += Math.max(-jmax * dt, Math.min(jmax * dt, cible - a));
       v = Math.max(0, v + a * dt); if (v === 0 && a < 0) a = 0;
@@ -409,14 +450,34 @@ function genererDemo() {
       if (rows.length > 20000) break;
     }
     v = 0; a = 0;
-    for (let k = 0; k < 20; k++) pousser(0, 0, 0);   // arrêt de 4 s
+    let fin = t + 4;   // arrêt de 4 s au moins
+    if (h) {
+      const k = premier + s - 1;
+      if (base == null) base = h[k] * 60 + retard - (t + 8);   // l'heure de la démo est calée sur le premier arrêt
+      retard = Math.max(-40, retard + (rnd() - 0.35) * 50);   // le retard dérive un peu d'un arrêt à l'autre
+      fin = Math.max(fin, h[k] * 60 + retard - base);
+    }
+    while (t < fin) pousser(0, 0, 0);
   }
-  return rows;
+  return { rows, base, depart: h ? h[premier] : null };
+}
+// course GTFS du jour, de cette ligne et de ce sens, avec le même parcours, la plus proche de l'heure actuelle
+function courseDuJourPourDemo(l, sens) {
+  if (!horaires) return null;
+  const ids = sens.arrets.map(a => a.id).join('|'), actifs = servicesDuJour(horaires, new Date());
+  const maintenant = new Date().getHours() * 60 + new Date().getMinutes();
+  let best = null;
+  for (const c of horaires.courses) {
+    if (c[1] !== l.id || c[2] !== sens.direction || !actifs.has(c[3]) || horaires.motifs[c[4]].join('|') !== ids) continue;
+    if (!best || Math.abs(c[6][0] - maintenant) < Math.abs(best[0] - maintenant)) best = c[6];
+  }
+  return best;
 }
 function lancerDemo() {
   E.simulation = true;
-  const rows = genererDemo(); let i = 0;
-  $('statut').textContent = 'Démo : bus simulé, accéléré ×10';
+  const { rows, base, depart } = genererDemo(); let i = 0;
+  if (base != null) { const d = new Date(); d.setHours(0, 0, 0, 0); E.debut = new Date(d.getTime() + base * 1000); }
+  $('statut').textContent = depart != null ? `Démo calée sur la course de ${heureMin(depart)}, accélérée ×10` : 'Démo : bus simulé, accéléré ×10';
   const parTick = new URLSearchParams(location.search).has('rapide') ? 400 : 5;   // ?rapide : pour les tests
   E.demo = setInterval(() => {
     for (let k = 0; k < parTick; k++) {
@@ -437,6 +498,7 @@ async function init() {
   $('partager').addEventListener('click', partager);
   $('nouveau').addEventListener('click', () => montrer('ecranService'));
   $('menuBilan').addEventListener('click', () => montrer('ecranId'));
+  fetch('horaires-imagine.json').then(r => r.json()).then(h => { horaires = h; }).catch(() => { /* pas de ponctualité hors ligne */ });
   try { reseau = await (await fetch('reseau-imagine.json')).json(); initService(); }
   catch (e) { erreur('erreurId', 'Impossible de charger les lignes du réseau. Vérifiez la connexion puis rechargez la page.'); }
 }

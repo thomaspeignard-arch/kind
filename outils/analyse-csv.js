@@ -281,3 +281,97 @@ export function qualiteMesure(texte, analyse) {
   return { corr_avant: analyse.corr_avant, corr_lateral: analyse.corr_lateral, nb_trous: nb, temps_trous_s: Math.round(trous),
     part_trous: pyRound(part, 3), douteuse: raisons.length > 0, raisons };
 }
+
+// ---------- rattachement à la course GTFS, ponctualité, inter-arrêts (docs/INDICATEURS.md, point 4) ----------
+// horaires : conducteur/horaires-imagine.json (services, arrets, motifs, courses).
+// debut : date et heure réelles de t_s = 0. intervalle : [t_debut, t_fin] de la course enregistrée.
+// route, direction : ligne et sens connus (mode ligne), ou null pour chercher dans tout le réseau.
+// Passage à un arrêt = à 30 m au plus ; s'il s'y arrête, l'heure retenue est celle du départ.
+// La course retenue a au moins 3 arrêts passés dans l'ordre (4, dont un vrai arrêt, si la ligne n'est
+// pas déclarée), au moins la moitié des arrêts prévus
+// pendant l'enregistrement, et un écart médian à l'horaire de 10 min au plus. Sinon : hors service.
+export const PONCTUALITE = { avance_s: 60, retard_s: 180 };   // en avance > 1 min, en retard > 3 min
+const RAYON_PASSAGE_M = 30, ECART_MAX_S = 600;
+
+const ymd = d => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+export function servicesDuJour(horaires, date) {
+  const j = ymd(date), jour = (date.getDay() + 6) % 7, actifs = new Set();   // lundi = 0
+  for (const [id, s] of Object.entries(horaires.services)) {
+    let ok = s.jours[jour] === '1' && j >= s.debut && j <= s.fin;
+    if (s.plus.includes(j)) ok = true;
+    if (s.moins.includes(j)) ok = false;
+    if (ok) actifs.add(id);
+  }
+  return actifs;
+}
+const mediane = l => { const s = [...l].sort((a, b) => a - b), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+
+export function rattacherCourse(texte, horaires, { debut, intervalle = null, route = null, direction = null, options = {} } = {}) {
+  const P = { ...PONCTUALITE, ...(options.ponctualite || {}) };
+  const brut = lireCsv(texte), garde = brut.t_s.map(t => t >= 5), d = {};
+  for (const c in brut) d[c] = brut[c].filter((_, i) => garde[i]);
+  const t = d.t_s, vs = lp(remplir(d.vitesse_kmh).map(x => x / 3.6), 0.15), lat = remplir(d.latitude), lon = remplir(d.longitude);
+  const idx = t.map((_, i) => i).filter(i => !intervalle || (t[i] >= intervalle[0] && t[i] <= intervalle[1]));
+  if (idx.length < 10) return { hors_service: true, raison: 'trajet trop court' };
+  const d0 = new Date(debut), minuit = new Date(d0); minuit.setHours(0, 0, 0, 0);
+  const base = (d0 - minuit) / 1000;   // secondes depuis minuit à t_s = 0
+  const tMin = (base + t[idx[0]]) / 60, tMax = (base + t[idx[idx.length - 1]]) / 60;
+
+  // passages du véhicule à un arrêt (mis en cache)
+  const cache = new Map();
+  const passages = id => {
+    if (cache.has(id)) return cache.get(id);
+    const [la, lo] = horaires.arrets[id], a = { lat: la, lon: lo }, res = [];
+    let run = null;
+    const clore = () => { if (!run) return; res.push({ t: run.dernierArret ?? run.tMin, arret: run.dernierArret != null }); run = null; };
+    for (const i of idx) {
+      const dd = dist2({ lat: lat[i], lon: lon[i] }, a);
+      if (dd > RAYON_PASSAGE_M) { clore(); continue; }
+      if (!run) run = { dMin: Infinity, tMin: t[i], dernierArret: null };
+      if (dd < run.dMin) { run.dMin = dd; run.tMin = t[i]; }
+      if (vs[i] * 3.6 <= V_ARRET_KMH) run.dernierArret = t[i];
+    }
+    clore(); cache.set(id, res); return res;
+  };
+
+  const actifs = servicesDuJour(horaires, d0);
+  let best = null, nbCandidats = 0;
+  for (const c of horaires.courses) {
+    const [trip, rid, dir, sid, im, dest, h] = c;
+    if (!actifs.has(sid) || (route && rid !== route) || (direction != null && dir !== direction)) continue;
+    if (h[h.length - 1] < tMin - 5 || h[0] > tMax + 5) continue;
+    nbCandidats++;
+    const motif = horaires.motifs[im];
+    let dernier = -Infinity; const vus = [];
+    for (let k = 0; k < motif.length; k++) {
+      const p = passages(motif[k]).find(v => v.t > dernier);
+      if (p) { vus.push({ k, t: p.t, arret: p.arret }); dernier = p.t; }
+    }
+    const attendus = h.filter(m => m >= tMin - 2 && m <= tMax + 2).length;
+    // sans ligne déclarée, plus exigeant : 4 arrêts au moins, dont un où le véhicule s'est vraiment arrêté
+    if (vus.length < (route ? 3 : 4) || vus.length < 0.5 * attendus || (!route && !vus.some(v => v.arret))) continue;
+    const ecarts = vus.map(v => base + v.t - h[v.k] * 60), cout = mediane(ecarts.map(Math.abs));
+    if (cout > ECART_MAX_S) continue;
+    if (!best || cout < best.cout - 30 || (Math.abs(cout - best.cout) <= 30 && vus.length > best.vus.length)) best = { c, vus, ecarts, cout };
+  }
+  if (!best) return { hors_service: true, raison: nbCandidats ? 'aucune course ne colle aux arrêts et à l’horaire' : 'aucune course prévue à cette heure', candidats: nbCandidats };
+
+  const [trip, rid, dir, sid, im, dest, h] = best.c, motif = horaires.motifs[im];
+  const statut = e => e < -P.avance_s ? 'avance' : e > P.retard_s ? 'retard' : 'heure';
+  const arrets = best.vus.map((v, n) => ({ id: motif[v.k], nom: horaires.arrets[motif[v.k]][2], rang: v.k + 1,
+    prevu_min: h[v.k], reel_s: Math.round(base + v.t), ecart_s: Math.round(best.ecarts[n]), statut: statut(best.ecarts[n]), arret_marque: v.arret }));
+  const inter = [];
+  for (let n = 1; n < best.vus.length; n++) {
+    const a = best.vus[n - 1], b = best.vus[n];
+    if (b.k !== a.k + 1) continue;   // inter-arrêt seulement entre deux arrêts consécutifs passés
+    inter.push({ de: horaires.arrets[motif[a.k]][2], a: horaires.arrets[motif[b.k]][2], reel_s: Math.round(b.t - a.t), prevu_s: Math.round((h[b.k] - h[a.k]) * 60) });
+  }
+  const compte = s => arrets.filter(a => a.statut === s).length;
+  return {
+    hors_service: false,
+    course: { trip_id: trip, route_id: rid, direction: dir, service_id: sid, destination: dest, depart_prevu_min: h[0], arrivee_prevue_min: h[h.length - 1], nb_arrets: motif.length },
+    ponctualite: { nb: arrets.length, a_l_heure: compte('heure'), avance: compte('avance'), retard: compte('retard'),
+      ecart_median_s: Math.round(mediane(best.ecarts)), seuils: P },
+    arrets, inter_arrets: inter,
+  };
+}
